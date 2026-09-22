@@ -1,0 +1,155 @@
+name: Windows Test Build
+
+# Fork-friendly, manual-only Windows x64 desktop test build.
+#
+# What it does:
+#   - Builds ONLY the Windows x64 (x86_64-pc-windows-msvc) Tauri desktop app
+#     plus the `codeg-mcp` stdio companion it needs at runtime.
+#   - Produces an unsigned NSIS installer you can download and run/install.
+#
+# What it deliberately does NOT do (so a fork needs no upstream secrets):
+#   - No GitHub Release, no git tag, no updater manifest (`latest.json`).
+#   - No updater artifacts / minisign signing — the dedicated test config
+#     `src-tauri/tauri.windows-test.conf.json` flips
+#     `bundle.createUpdaterArtifacts` to false so Tauri never asks for the
+#     `TAURI_SIGNING_PRIVATE_KEY`. The upstream release config is untouched.
+#   - No Apple / Linux / server / Docker matrices — desktop Windows x64 only.
+#
+# First-time enablement note (for the fork owner):
+#   `workflow_dispatch` workflows only appear in the Actions UI once the file
+#   exists on the repository's DEFAULT branch. Merge this file into your
+#   fork's `main` first; afterwards you can pick any branch from the "Run
+#   workflow" branch dropdown. See docs/releasing/windows-test-build.md.
+
+on:
+  workflow_dispatch:
+
+# The produced installer is unsigned; nothing here needs write access.
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-test-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_BACKTRACE: short
+  # Match release.yml: keep husky git hooks out of CI installs.
+  HUSKY: 0
+
+jobs:
+  build-windows-x64:
+    name: Windows x64 desktop (NSIS)
+    runs-on: windows-2022
+    timeout-minutes: 90
+    env:
+      TARGET: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The selected commit is enough for the SHA/subject artifact label.
+          # Avoid downloading the full repository history for a test build.
+          fetch-depth: 1
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: "pnpm"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          # Reuse the same key namespace as the release Windows x64 build so a
+          # fork that has run either workflow warms the other's cache.
+          shared-key: x86_64-pc-windows-msvc
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Build the `codeg-mcp` companion for the Windows x64 triple and stage it
+      # as a Tauri sidecar at `src-tauri/binaries/codeg-mcp-<triple>.exe`. The
+      # `tauri build` below bundles it via `bundle.externalBin` in
+      # tauri.conf.json — Tauri installs it next to codeg.exe where the runtime
+      # `locate_codeg_mcp_binary()` finds it. Done here (not in
+      # beforeBuildCommand) so we honour the explicit target instead of the
+      # host triple; the build step sets CODEG_SKIP_SIDECAR=1 to avoid a
+      # duplicate host-triple pass.
+      - name: Stage codeg-mcp sidecar for Tauri bundle
+        run: pnpm tauri:prepare-sidecars --target x86_64-pc-windows-msvc
+
+      - name: Verify codeg-mcp sidecar landed
+        shell: pwsh
+        run: |
+          $file = "src-tauri/binaries/codeg-mcp-$env:TARGET.exe"
+          if (-not (Test-Path $file)) {
+            throw "FATAL: sidecar $file missing after prepare-sidecars"
+          }
+          Get-Item $file | Format-List Name, Length, LastWriteTime
+
+      # `pnpm tauri:before-build` (the beforeBuildCommand) runs `pnpm build`
+      # (frontend static export) + prepare-sidecars. CODEG_SKIP_SIDECAR=1 makes
+      # that inner sidecar pass a no-op so we don't rebuild codeg-mcp for the
+      # host triple — the frontend is still built exactly once here.
+      #
+      # `--bundles nsis` skips MSI/WiX (tauri-apps/tauri#14681: light.exe fails
+      # with externalBin). The extra `-c` config merges
+      # createUpdaterArtifacts=false on top of tauri.conf.json so no updater
+      # zip/signature is produced and no signing key is required.
+      - name: Build Windows x64 desktop app (NSIS, unsigned, no updater)
+        shell: pwsh
+        env:
+          CODEG_SKIP_SIDECAR: "1"
+        run: |
+          # Use an absolute path so CLI working-directory changes cannot affect it.
+          $config = (Resolve-Path -LiteralPath "src-tauri/tauri.windows-test.conf.json").Path
+          pnpm tauri build --target $env:TARGET --bundles nsis --config "$config"
+
+      - name: Collect NSIS installer
+        id: collect
+        shell: pwsh
+        run: |
+          $bundleDir = "src-tauri/target/$env:TARGET/release/bundle/nsis"
+          if (-not (Test-Path $bundleDir)) {
+            throw "NSIS bundle directory not found: $bundleDir"
+          }
+          $installers = @(Get-ChildItem -Path $bundleDir -Filter "*-setup.exe" -File)
+          if ($installers.Count -eq 0) {
+            Get-ChildItem -Recurse $bundleDir | Format-Table FullName
+            throw "No *-setup.exe produced under $bundleDir"
+          }
+          $staging = "artifact-staging"
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          foreach ($f in $installers) {
+            Copy-Item $f.FullName -Destination $staging
+            Write-Host "staged installer: $($f.Name) ($([math]::Round($f.Length / 1MB, 1)) MB)"
+          }
+          # Short-sha + sanitized commit subject so the artifact is traceable to
+          # the exact commit it was built from.
+          $shortSha = "$env:GITHUB_SHA".Substring(0, 7)
+          $subject = (git show -s --format=%s $env:GITHUB_SHA)
+          $subject = $subject -replace '[^A-Za-z0-9._-]', '-'
+          if ($subject.Length -gt 40) { $subject = $subject.Substring(0, 40) }
+          $name = "codeg-windows-x64-$shortSha-$subject"
+          # Artifact names cannot contain some characters; the sanitize above
+          # keeps us to [A-Za-z0-9._-].
+          "artifact_name=$name" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.collect.outputs.artifact_name }}
+          path: artifact-staging/*
+          if-no-files-found: error
+          retention-days: 14
