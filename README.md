@@ -28,6 +28,8 @@ It aggregates your sessions from every supported agent CLI into one searchable w
 
 **Full documentation lives at [docs.codeg.app](https://docs.codeg.app)** — [Getting Started](https://docs.codeg.app/getting-started/) · [Guide](https://docs.codeg.app/guide/) · [Reference](https://docs.codeg.app/reference/)
 
+[SSH-managed remote workspaces](./docs/ssh-workspaces.md) - setup, security, lifecycle and recovery.
+
 ## 💖 Sponsors
 
 <table>

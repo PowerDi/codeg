@@ -432,7 +432,7 @@ mod tests {
                  \"message\":\"boom\"}}"
             );
             let err = parse_reply(&json).unwrap_err();
-            assert_eq!(err.code, expected, "wrong code mapping for {code}");
+            assert_eq!(std::mem::discriminant(&err.code), std::mem::discriminant(&expected), "wrong code mapping for {code}");
             assert_eq!(err.message, "boom");
         }
     }
@@ -621,7 +621,7 @@ mod tests {
              \"message\":\"left alone in case agents are still working\"}",
         )
         .unwrap_err();
-        assert_eq!(err.code, crate::app_error::AppErrorCode::TaskExecutionFailed);
+        assert!(matches!(err.code, crate::app_error::AppErrorCode::TaskExecutionFailed));
         assert!(err.message.contains("left alone"));
     }
 

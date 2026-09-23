@@ -10,3 +10,6 @@ pub mod command;
 pub mod redact;
 #[cfg(feature = "tauri-runtime")]
 pub mod tunnel;
+
+#[cfg(all(test, feature = "tauri-runtime", feature = "test-utils", target_os = "linux"))]
+mod integration_tests;

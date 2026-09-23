@@ -77,12 +77,21 @@ export interface RemoteWorkspaceHeader {
   value: string
 }
 
+/** Optional fields inherit the user's system OpenSSH configuration. */
+export interface RemoteWorkspaceSshConfig {
+  host: string
+  username?: string
+  port?: number
+  identityFile?: string
+}
+
 export interface RemoteWorkspaceConnection {
   id: number
   name: string
   base_url: string
   token: string
   headers: RemoteWorkspaceHeader[]
+  ssh?: RemoteWorkspaceSshConfig | null
   sort_order: number
   created_at: string
   updated_at: string
@@ -93,6 +102,7 @@ export interface RemoteWorkspaceConnectionInput {
   baseUrl: string
   token: string
   headers: RemoteWorkspaceHeader[]
+  ssh?: RemoteWorkspaceSshConfig | null
 }
 
 export interface ConversationSummary {

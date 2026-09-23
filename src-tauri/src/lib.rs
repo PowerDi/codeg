@@ -2034,7 +2034,7 @@ mod tauri_app {
             .run(|app, event| match event {
                 tauri::RunEvent::ExitRequested { .. } => {
                     APP_QUITTING.store(true, Ordering::Relaxed);
-                    if let Some(proxy) = app.try_state::<Arc<crate::commands::remote_proxy::RemoteProxyState>>() {
+                    if let Some(proxy) = app.try_state::<std::sync::Arc<crate::commands::remote_proxy::RemoteProxyState>>() {
                         tauri::async_runtime::block_on(proxy.shutdown_all());
                     }
                     // Drop the desktop pet alongside the workspace so it

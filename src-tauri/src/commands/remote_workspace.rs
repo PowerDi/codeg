@@ -222,12 +222,21 @@ pub async fn open_remote_workspace(
         return Ok(());
     }
 
-    let resolved = proxy.ssh.resolve_connection(&db.conn, id).await?;
-    if !resolved.is_ssh() {
-        validate_remote_health(&resolved.base_url, &resolved.token, &resolved.headers).await?;
-    }
-
+    // Reserve the instance before connecting. A late request from a destroyed
+    // window may not resurrect a tunnel; only an explicit new window can.
     let window_instance_id = new_remote_window_instance_id();
+    proxy.ssh.register_window(id, &window_instance_id);
+    let ready = async {
+        let resolved = proxy.ssh.resolve_connection(&db.conn, id).await?;
+        if !resolved.is_ssh() {
+            validate_remote_health(&resolved.base_url, &resolved.token, &resolved.headers).await?;
+        }
+        Ok::<_, AppCommandError>(())
+    }.await;
+    if let Err(err) = ready {
+        proxy.ssh.window_closed(id, &window_instance_id);
+        return Err(err);
+    }
     let url = WebviewUrl::App(
         format!("workspace?remoteConnectionId={id}&remoteWindowId={window_instance_id}").into(),
     );
@@ -246,7 +255,7 @@ pub async fn open_remote_workspace(
     let window = match builder.build() {
         Ok(window) => window,
         Err(err) => {
-            proxy.ssh.shutdown(id).await;
+            proxy.ssh.window_closed(id, &window_instance_id);
             return Err(AppCommandError::window("Failed to open remote workspace", err.to_string()));
         }
     };

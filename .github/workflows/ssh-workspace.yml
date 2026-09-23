@@ -52,9 +52,27 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev openssh-server
           mkdir -p out
           printf '<!doctype html><html><body></body></html>\n' > out/index.html
+      - name: Format touched Rust files
+        run: |
+          rustfmt --edition 2021 --config skip_children=true \
+            src-tauri/src/ssh/*.rs \
+            src-tauri/src/lib.rs src-tauri/src/models/mod.rs \
+            src-tauri/src/models/remote_workspace_connection.rs \
+            src-tauri/src/commands/remote_workspace.rs src-tauri/src/commands/remote_proxy.rs \
+            src-tauri/src/db/entities/remote_workspace_connection.rs \
+            src-tauri/src/db/service/remote_workspace_connection_service.rs \
+            src-tauri/src/db/migration/m20260920_000001_remote_workspace_connection_ssh.rs
+          git diff -- src-tauri > "$RUNNER_TEMP/ssh-rustfmt.patch"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ssh-rustfmt-${{ github.sha }}
+          path: ${{ runner.temp }}/ssh-rustfmt.patch
+          retention-days: 7
       - name: Desktop tests (including SSH behavior)
         working-directory: src-tauri
         run: cargo test --features test-utils --lib
+      - name: Isolated SSH install, reuse, HTTP and WebSocket recovery
+        run: bash scripts/ssh-workspace-ci.sh
       - name: Desktop clippy
         working-directory: src-tauri
         run: cargo clippy --all-targets --features test-utils -- -D warnings

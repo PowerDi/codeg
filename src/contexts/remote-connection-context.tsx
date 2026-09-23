@@ -205,7 +205,9 @@ export function RemoteConnectionGate({ children }: { children: ReactNode }) {
   if (expired) {
     return (
       <div className="flex h-screen items-center justify-center bg-background p-6 text-sm text-destructive">
-        {t("connectionExpired", { name: connection?.name ?? "" })}
+        {t(connection?.ssh ? "sshConnectionExpired" : "connectionExpired", {
+          name: connection?.name ?? "",
+        })}
       </div>
     )
   }

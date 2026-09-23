@@ -1,5 +1,7 @@
 "use client"
 
+import { remoteWorkspaceAddress } from "@/lib/remote-workspace-form"
+
 import {
   memo,
   useCallback,
@@ -3338,7 +3340,7 @@ export function SidebarConversationList({
                               {connection.name}
                             </span>
                             <span className="block truncate text-xs text-muted-foreground">
-                              {connection.base_url}
+                              {remoteWorkspaceAddress(connection)}
                             </span>
                           </span>
                         </ContextMenuItem>

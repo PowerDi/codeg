@@ -25,7 +25,15 @@ import {
   listRemoteWorkspaceConnections,
   reorderRemoteWorkspaceConnections,
   updateRemoteWorkspaceConnection,
+  testRemoteWorkspaceConnection,
 } from "@/lib/remote-workspace"
+import {
+  EMPTY_REMOTE_WORKSPACE_DRAFT as EMPTY_DRAFT,
+  remoteWorkspaceAddress,
+  remoteWorkspaceDraft,
+  remoteWorkspaceInput,
+  type RemoteWorkspaceDraft as Draft,
+} from "@/lib/remote-workspace-form"
 import { toErrorMessage } from "@/lib/app-error"
 import type {
   RemoteWorkspaceConnection,
@@ -71,14 +79,6 @@ interface RemoteWorkspaceManageDialogProps {
   onChanged: () => void
 }
 
-interface Draft {
-  id: number | null
-  name: string
-  baseUrl: string
-  token: string
-  headers: RemoteWorkspaceHeader[]
-}
-
 interface RemoteWorkspaceReorderItemProps {
   connection: RemoteWorkspaceConnection
   selected: boolean
@@ -88,14 +88,6 @@ interface RemoteWorkspaceReorderItemProps {
   children: (
     startDrag: (event: PointerEvent<HTMLButtonElement>) => void
   ) => ReactNode
-}
-
-const EMPTY_DRAFT: Draft = {
-  id: null,
-  name: "",
-  baseUrl: "",
-  token: "",
-  headers: [],
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -174,6 +166,9 @@ export function RemoteWorkspaceManageDialog({
   const [formError, setFormError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [testSucceeded, setTestSucceeded] = useState(false)
+  const busy = saving || testing || deleting
   const [deleteTargetId, setDeleteTargetId] = useState<number | null>(null)
   const [reordering, setReordering] = useState(false)
   const [headersOpen, setHeadersOpen] = useState(false)
@@ -250,13 +245,8 @@ export function RemoteWorkspaceManageDialog({
       setDraft(EMPTY_DRAFT)
       return
     }
-    setDraft({
-      id: selected.id,
-      name: selected.name,
-      baseUrl: selected.base_url,
-      token: selected.token,
-      headers: selected.headers ?? [],
-    })
+    setTestSucceeded(false)
+    setDraft(remoteWorkspaceDraft(selected))
   }, [selected])
 
   const filteredConnections = useMemo(() => {
@@ -265,7 +255,7 @@ export function RemoteWorkspaceManageDialog({
     return connections.filter(
       (connection) =>
         connection.name.toLowerCase().includes(query) ||
-        connection.base_url.toLowerCase().includes(query)
+        remoteWorkspaceAddress(connection).toLowerCase().includes(query)
     )
   }, [connections, searchQuery])
 
@@ -284,7 +274,9 @@ export function RemoteWorkspaceManageDialog({
   const leftMaxSize = Math.max(leftMinSize, 100 - rightMinSize)
 
   const updateDraft = useCallback((patch: Partial<Draft>) => {
+    setTestSucceeded(false)
     setFormError(null)
+    setTestSucceeded(false)
     setDraft((prev) => ({ ...prev, ...patch }))
   }, [])
 
@@ -292,12 +284,14 @@ export function RemoteWorkspaceManageDialog({
     setSelectedId(null)
     setFormError(null)
     setDraft(EMPTY_DRAFT)
+    setTestSucceeded(false)
     setHeadersOpen(false)
   }, [])
 
   const updateHeader = useCallback(
     (index: number, patch: Partial<RemoteWorkspaceHeader>) => {
       setFormError(null)
+      setTestSucceeded(false)
       setDraft((prev) => ({
         ...prev,
         headers: prev.headers.map((header, position) =>
@@ -310,6 +304,7 @@ export function RemoteWorkspaceManageDialog({
 
   const addHeader = useCallback(() => {
     setFormError(null)
+    setTestSucceeded(false)
     setDraft((prev) => ({
       ...prev,
       headers: [...prev.headers, { name: "", value: "" }],
@@ -318,6 +313,7 @@ export function RemoteWorkspaceManageDialog({
 
   const removeHeader = useCallback((index: number) => {
     setFormError(null)
+    setTestSucceeded(false)
     setDraft((prev) => ({
       ...prev,
       headers: prev.headers.filter((_, position) => position !== index),
@@ -355,16 +351,36 @@ export function RemoteWorkspaceManageDialog({
     [searchActive]
   )
 
-  const handleSave = useCallback(async () => {
-    setSaving(true)
+  const handleTest = useCallback(async () => {
+    const result = remoteWorkspaceInput(draft, false)
+    if (result.error) {
+      setFormError(t(result.error))
+      return
+    }
+    setTesting(true)
+    setTestSucceeded(false)
     setFormError(null)
     try {
-      const input = {
-        name: draft.name,
-        baseUrl: draft.baseUrl,
-        token: draft.token,
-        headers: draft.headers,
-      }
+      await testRemoteWorkspaceConnection(result.input)
+      setTestSucceeded(true)
+    } catch (err) {
+      setFormError(`${t("testFailed")}: ${toErrorMessage(err)}`)
+    } finally {
+      setTesting(false)
+    }
+  }, [draft, t])
+
+  const handleSave = useCallback(async () => {
+    const result = remoteWorkspaceInput(draft)
+    if (result.error) {
+      setFormError(t(result.error))
+      return
+    }
+    setSaving(true)
+    setTestSucceeded(false)
+    setFormError(null)
+    try {
+      const input = result.input
       const saved =
         draft.id === null
           ? await createRemoteWorkspaceConnection(input)
@@ -377,13 +393,7 @@ export function RemoteWorkspaceManageDialog({
         return [...prev, saved]
       })
       setSelectedId(saved.id)
-      setDraft({
-        id: saved.id,
-        name: saved.name,
-        baseUrl: saved.base_url,
-        token: saved.token,
-        headers: saved.headers ?? [],
-      })
+      setDraft(remoteWorkspaceDraft(saved))
       onChanged()
     } catch (err) {
       setFormError(`${t("saveFailed")}: ${toErrorMessage(err)}`)
@@ -418,7 +428,12 @@ export function RemoteWorkspaceManageDialog({
 
   return (
     <>
-      <Dialog open={open} onOpenChange={onOpenChange}>
+      <Dialog
+        open={open}
+        onOpenChange={(next) => {
+          if (!busy) onOpenChange(next)
+        }}
+      >
         <DialogContent className="flex h-[min(47.5rem,calc(100vh-4rem))] max-w-[min(61.25rem,calc(100vw-2rem))] flex-col gap-0 overflow-hidden p-0 sm:max-w-5xl">
           <DialogHeader className="border-b px-4 py-3">
             <DialogTitle>{t("manageTitle")}</DialogTitle>
@@ -442,7 +457,11 @@ export function RemoteWorkspaceManageDialog({
                         onChange={(event) => setSearchQuery(event.target.value)}
                         placeholder={t("searchPlaceholder")}
                       />
-                      <Button size="sm" onClick={startNew}>
+                      <Button
+                        size="sm"
+                        onClick={startNew}
+                        disabled={busy || loading || reordering}
+                      >
                         <Plus className="h-3.5 w-3.5" />
                         {t("newConnection")}
                       </Button>
@@ -474,6 +493,7 @@ export function RemoteWorkspaceManageDialog({
                     >
                       {filteredConnections.map((connection) => {
                         const dragDisabled =
+                          busy ||
                           reordering ||
                           searchActive ||
                           filteredConnections.length < 2
@@ -483,7 +503,9 @@ export function RemoteWorkspaceManageDialog({
                             connection={connection}
                             selected={selectedId === connection.id}
                             disabled={dragDisabled}
-                            onSelect={setSelectedId}
+                            onSelect={(id) => {
+                              if (!busy) setSelectedId(id)
+                            }}
                             onDragEnd={() => {
                               const order = pendingOrderRef.current
                               pendingOrderRef.current = null
@@ -517,7 +539,7 @@ export function RemoteWorkspaceManageDialog({
                                     {connection.name}
                                   </div>
                                   <div className="mt-0.5 truncate text-2xs text-muted-foreground">
-                                    {connection.base_url}
+                                    {remoteWorkspaceAddress(connection)}
                                   </div>
                                 </div>
                               </div>
@@ -534,7 +556,10 @@ export function RemoteWorkspaceManageDialog({
 
               <ResizablePanel defaultSize={64} minSize={rightMinSize}>
                 <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border bg-card lg:rounded-l-none lg:border-l-0">
-                  <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
+                  <fieldset
+                    disabled={busy}
+                    className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4"
+                  >
                     <div className="space-y-1.5">
                       <Label
                         htmlFor="remote-workspace-name"
@@ -550,106 +575,228 @@ export function RemoteWorkspaceManageDialog({
                         }
                       />
                     </div>
-                    <div className="space-y-1.5">
-                      <Label
-                        htmlFor="remote-workspace-base-url"
-                        className="text-xs"
-                      >
-                        {t("baseUrl")}
-                      </Label>
-                      <Input
-                        id="remote-workspace-base-url"
-                        value={draft.baseUrl}
-                        placeholder="http://127.0.0.1:3080"
-                        onChange={(event) =>
-                          updateDraft({ baseUrl: event.target.value })
-                        }
-                      />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label
-                        htmlFor="remote-workspace-token"
-                        className="text-xs"
-                      >
-                        {t("token")}
-                      </Label>
-                      <Input
-                        id="remote-workspace-token"
-                        type="password"
-                        value={draft.token}
-                        onChange={(event) =>
-                          updateDraft({ token: event.target.value })
-                        }
-                      />
-                    </div>
-                    <Collapsible
-                      open={headersOpen}
-                      onOpenChange={setHeadersOpen}
-                      className="space-y-2"
-                    >
-                      <CollapsibleTrigger className="flex h-6 w-full items-center gap-1.5 rounded-md text-xs font-medium text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40">
-                        <ChevronRight
-                          className={cn(
-                            "h-3.5 w-3.5 transition-transform",
-                            headersOpen && "rotate-90"
-                          )}
-                        />
-                        {t("customHeaders")}
-                        {draft.headers.length > 0 ? (
-                          <span className="rounded bg-muted px-1.5 text-3xs leading-4 text-muted-foreground">
-                            {draft.headers.length}
-                          </span>
-                        ) : null}
-                      </CollapsibleTrigger>
-                      <CollapsibleContent className="space-y-2">
-                        {draft.headers.map((header, index) => (
-                          <div
-                            key={index}
-                            className="flex items-center gap-2"
-                            data-remote-workspace-header-row={index}
-                          >
-                            <Input
-                              className="flex-1"
-                              value={header.name}
-                              placeholder={t("customHeaderName")}
-                              aria-label={t("customHeaderName")}
-                              onChange={(event) =>
-                                updateHeader(index, {
-                                  name: event.target.value,
-                                })
-                              }
+                    <fieldset className="space-y-2">
+                      <legend className="text-xs font-medium">
+                        {t("connectionType")}
+                      </legend>
+                      <div className="flex flex-wrap gap-4 text-sm">
+                        {(["http", "ssh"] as const).map((mode) => (
+                          <label key={mode} className="flex items-center gap-2">
+                            <input
+                              type="radio"
+                              name="remote-workspace-type"
+                              value={mode}
+                              checked={draft.mode === mode}
+                              onChange={() => updateDraft({ mode })}
                             />
-                            <Input
-                              className="flex-1"
-                              type="password"
-                              value={header.value}
-                              placeholder={t("customHeaderValue")}
-                              aria-label={t("customHeaderValue")}
-                              onChange={(event) =>
-                                updateHeader(index, {
-                                  value: event.target.value,
-                                })
-                              }
-                            />
-                            <Button
-                              size="icon"
-                              variant="ghost"
-                              className="h-7 w-7 shrink-0 text-destructive"
-                              aria-label={t("removeCustomHeader")}
-                              title={t("removeCustomHeader")}
-                              onClick={() => removeHeader(index)}
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </Button>
-                          </div>
+                            {t(mode === "ssh" ? "sshType" : "httpType")}
+                          </label>
                         ))}
-                        <Button size="sm" variant="outline" onClick={addHeader}>
-                          <Plus className="h-3.5 w-3.5" />
-                          {t("addCustomHeader")}
-                        </Button>
-                      </CollapsibleContent>
-                    </Collapsible>
-                  </div>
+                      </div>
+                    </fieldset>
+                    {draft.mode === "ssh" ? (
+                      <div className="space-y-4">
+                        <p className="text-xs leading-relaxed text-muted-foreground">
+                          {t("sshHelp")}
+                        </p>
+                        <div className="space-y-1.5">
+                          <Label
+                            htmlFor="remote-workspace-ssh-host"
+                            className="text-xs"
+                          >
+                            {t("sshHost")}
+                          </Label>
+                          <Input
+                            id="remote-workspace-ssh-host"
+                            value={draft.sshHost}
+                            placeholder="my-server"
+                            maxLength={255}
+                            onChange={(event) =>
+                              updateDraft({ sshHost: event.target.value })
+                            }
+                          />
+                        </div>
+                        <div className="grid grid-cols-2 gap-3">
+                          <div className="space-y-1.5">
+                            <Label
+                              htmlFor="remote-workspace-ssh-user"
+                              className="text-xs"
+                            >
+                              {t("sshUsername")}
+                            </Label>
+                            <Input
+                              id="remote-workspace-ssh-user"
+                              value={draft.sshUsername}
+                              placeholder={t("sshConfigDefault")}
+                              onChange={(event) =>
+                                updateDraft({ sshUsername: event.target.value })
+                              }
+                            />
+                          </div>
+                          <div className="space-y-1.5">
+                            <Label
+                              htmlFor="remote-workspace-ssh-port"
+                              className="text-xs"
+                            >
+                              {t("sshPort")}
+                            </Label>
+                            <Input
+                              id="remote-workspace-ssh-port"
+                              inputMode="numeric"
+                              value={draft.sshPort}
+                              placeholder={t("sshConfigDefault")}
+                              onChange={(event) =>
+                                updateDraft({ sshPort: event.target.value })
+                              }
+                            />
+                          </div>
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label
+                            htmlFor="remote-workspace-ssh-key"
+                            className="text-xs"
+                          >
+                            {t("sshIdentityFile")}
+                          </Label>
+                          <Input
+                            id="remote-workspace-ssh-key"
+                            value={draft.sshIdentityFile}
+                            placeholder={t("sshConfigDefault")}
+                            onChange={(event) =>
+                              updateDraft({
+                                sshIdentityFile: event.target.value,
+                              })
+                            }
+                          />
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          {t("sshOptionalHint")}
+                        </p>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="space-y-1.5">
+                          <Label
+                            htmlFor="remote-workspace-base-url"
+                            className="text-xs"
+                          >
+                            {t("baseUrl")}
+                          </Label>
+                          <Input
+                            id="remote-workspace-base-url"
+                            value={draft.baseUrl}
+                            placeholder="http://127.0.0.1:3080"
+                            onChange={(event) =>
+                              updateDraft({ baseUrl: event.target.value })
+                            }
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label
+                            htmlFor="remote-workspace-token"
+                            className="text-xs"
+                          >
+                            {t("token")}
+                          </Label>
+                          <Input
+                            id="remote-workspace-token"
+                            type="password"
+                            value={draft.token}
+                            onChange={(event) =>
+                              updateDraft({ token: event.target.value })
+                            }
+                          />
+                        </div>
+                        <Collapsible
+                          open={headersOpen}
+                          onOpenChange={setHeadersOpen}
+                          className="space-y-2"
+                        >
+                          <CollapsibleTrigger className="flex h-6 w-full items-center gap-1.5 rounded-md text-xs font-medium text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40">
+                            <ChevronRight
+                              className={cn(
+                                "h-3.5 w-3.5 transition-transform",
+                                headersOpen && "rotate-90"
+                              )}
+                            />
+                            {t("customHeaders")}
+                            {draft.headers.length > 0 ? (
+                              <span className="rounded bg-muted px-1.5 text-3xs leading-4 text-muted-foreground">
+                                {draft.headers.length}
+                              </span>
+                            ) : null}
+                          </CollapsibleTrigger>
+                          <CollapsibleContent className="space-y-2">
+                            {draft.headers.map((header, index) => (
+                              <div
+                                key={index}
+                                className="flex items-center gap-2"
+                                data-remote-workspace-header-row={index}
+                              >
+                                <Input
+                                  className="flex-1"
+                                  value={header.name}
+                                  placeholder={t("customHeaderName")}
+                                  aria-label={t("customHeaderName")}
+                                  onChange={(event) =>
+                                    updateHeader(index, {
+                                      name: event.target.value,
+                                    })
+                                  }
+                                />
+                                <Input
+                                  className="flex-1"
+                                  type="password"
+                                  value={header.value}
+                                  placeholder={t("customHeaderValue")}
+                                  aria-label={t("customHeaderValue")}
+                                  onChange={(event) =>
+                                    updateHeader(index, {
+                                      value: event.target.value,
+                                    })
+                                  }
+                                />
+                                <Button
+                                  size="icon"
+                                  variant="ghost"
+                                  className="h-7 w-7 shrink-0 text-destructive"
+                                  aria-label={t("removeCustomHeader")}
+                                  title={t("removeCustomHeader")}
+                                  onClick={() => removeHeader(index)}
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </Button>
+                              </div>
+                            ))}
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={addHeader}
+                            >
+                              <Plus className="h-3.5 w-3.5" />
+                              {t("addCustomHeader")}
+                            </Button>
+                          </CollapsibleContent>
+                        </Collapsible>
+                      </>
+                    )}
+                    {testSucceeded && (
+                      <p
+                        role="status"
+                        className="text-xs text-muted-foreground"
+                      >
+                        {t("testSucceeded")}
+                      </p>
+                    )}
+                    {draft.mode === "ssh" && (saving || testing) && (
+                      <p
+                        role="status"
+                        className="text-xs text-muted-foreground"
+                      >
+                        {t("sshConnecting")}
+                      </p>
+                    )}
+                  </fieldset>
 
                   <div className="space-y-3 border-t px-4 py-3">
                     {formError ? (
@@ -662,7 +809,7 @@ export function RemoteWorkspaceManageDialog({
                         size="sm"
                         variant="outline"
                         onClick={() => setDeleteTargetId(draft.id)}
-                        disabled={deleting || saving || draft.id === null}
+                        disabled={busy || draft.id === null}
                         className="text-red-500 hover:text-red-500"
                       >
                         {deleting ? (
@@ -674,12 +821,23 @@ export function RemoteWorkspaceManageDialog({
                       </Button>
                       <Button
                         size="sm"
+                        variant="outline"
+                        disabled={busy}
+                        onClick={() => void handleTest()}
+                      >
+                        {testing && (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        )}
+                        {t("testConnection")}
+                      </Button>
+                      <Button
+                        size="sm"
                         onClick={() => {
                           handleSave().catch((err) => {
                             console.error("[RemoteWorkspace] save failed:", err)
                           })
                         }}
-                        disabled={saving || deleting}
+                        disabled={busy}
                       >
                         {saving ? (
                           <Loader2 className="h-3.5 w-3.5 animate-spin" />

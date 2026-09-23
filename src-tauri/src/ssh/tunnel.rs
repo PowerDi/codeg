@@ -108,6 +108,7 @@ struct ManagerState {
     sessions: HashMap<i32, Arc<SshSession>>,
     windows: HashMap<i32, HashSet<String>>,
     closing: bool,
+    closed_profiles: HashSet<i32>,
 }
 
 pub struct SshManager {
@@ -134,14 +135,16 @@ impl SshManager {
 
     fn session(&self, id: i32) -> Result<Arc<SshSession>, AppCommandError> {
         let mut state = self.state.lock().unwrap();
-        if state.closing {
-            return Err(AppCommandError::network("The desktop is shutting down"));
+        if state.closing || state.closed_profiles.contains(&id) {
+            return Err(AppCommandError::network("The remote workspace is closed"));
         }
         Ok(state.sessions.entry(id).or_insert_with(|| Arc::new(SshSession::new())).clone())
     }
 
     pub fn register_window(&self, id: i32, instance: &str) {
-        self.state.lock().unwrap().windows.entry(id).or_default().insert(instance.to_string());
+        let mut state = self.state.lock().unwrap();
+        state.closed_profiles.remove(&id);
+        state.windows.entry(id).or_default().insert(instance.to_string());
     }
 
     pub fn window_closed(&self, id: i32, instance: &str) {
@@ -152,6 +155,7 @@ impl SshManager {
                 return;
             }
             state.windows.remove(&id);
+            state.closed_profiles.insert(id);
             let session = state.sessions.remove(&id);
             if let Some(session) = &session {
                 session.cancelled.cancel();
@@ -369,6 +373,23 @@ mod tests {
         assert!(!Arc::ptr_eq(&session, &manager.session(1).unwrap()));
         manager.shutdown_all().await;
         assert!(manager.session(1).is_err());
+    }
+
+    #[tokio::test]
+    async fn last_window_close_tombstones_late_requests_but_not_a_reopened_window() {
+        let manager = SshManager::new();
+        manager.register_window(1, "old");
+        manager.register_window(1, "new");
+        let session = manager.session(1).unwrap();
+        manager.window_closed(1, "old");
+        assert!(!session.cancelled.is_cancelled());
+        manager.window_closed(1, "new");
+        assert!(session.cancelled.is_cancelled());
+        assert!(manager.session(1).is_err());
+        manager.register_window(1, "reopened");
+        manager.window_closed(1, "old");
+        assert!(manager.session(1).is_ok());
+        manager.shutdown_all().await;
     }
 
     #[cfg(feature = "test-utils")]
