@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use sea_orm::DatabaseConnection;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::process::Child;
 use tokio::sync::Mutex;
@@ -22,6 +22,12 @@ use crate::ssh::command::{ssh_command, SshInvocation};
 const TUNNEL_READY_TIMEOUT: Duration = Duration::from_secs(25);
 const HEALTH_INTERVAL: Duration = Duration::from_secs(3);
 const STDERR_LIMIT: usize = 8192;
+const TUNNEL_READY_LINE: &str = "CODEG_TUNNEL_READY";
+// OpenSSH sets up forwards before executing this command. With
+// ExitOnForwardFailure, the ack cannot arrive if another process stole the
+// selected port. Never send a bearer token merely because that port is open.
+// Keep the parent's stdin pipe open; on disconnect, cat sees EOF and exits.
+const TUNNEL_COMMAND: &str = "sh -c 'printf \"CODEG_TUNNEL_READY\\n\"; cat >/dev/null'";
 
 struct ActiveTunnel {
     local_port: u16,
@@ -31,6 +37,7 @@ struct ActiveTunnel {
     last_health: Instant,
     stderr: Arc<StdMutex<Vec<u8>>>,
     stderr_task: tokio::task::JoinHandle<()>,
+    stdout_task: tokio::task::JoinHandle<()>,
 }
 
 impl Drop for ActiveTunnel {
@@ -38,6 +45,7 @@ impl Drop for ActiveTunnel {
         // kill_on_drop owns only this local SSH child, never the remote server.
         let _ = self.child.start_kill();
         self.stderr_task.abort();
+        self.stdout_task.abort();
     }
 }
 
@@ -252,17 +260,26 @@ impl SshManager {
                     local_port,
                     remote_port: outcome.port,
                 },
-                None,
+                Some(TUNNEL_COMMAND),
             );
             command
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .kill_on_drop(true);
             let mut child = command.spawn().map_err(|e| {
                 AppCommandError::io_error("Could not start the system ssh client")
                     .with_detail(e.to_string())
             })?;
+            let mut stdout_pipe = child.stdout.take().expect("stdout is piped");
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let stdout_task = tokio::spawn(async move {
+                let ready = read_forward_ready(&mut stdout_pipe).await;
+                let _ = ready_tx.send(ready);
+                if ready {
+                    let _ = tokio::io::copy(&mut stdout_pipe, &mut tokio::io::sink()).await;
+                }
+            });
             let mut stderr_pipe = child.stderr.take().expect("stderr is piped");
             let stderr = Arc::new(StdMutex::new(Vec::new()));
             let log = stderr.clone();
@@ -288,17 +305,13 @@ impl SshManager {
                 last_health: Instant::now() - HEALTH_INTERVAL,
                 stderr,
                 stderr_task,
+                stdout_task,
             };
             let ready = tokio::time::timeout(TUNNEL_READY_TIMEOUT, async {
-                loop {
-                    if active.exited() {
-                        return false;
-                    }
-                    if tunnel_port_open(local_port).await && active.healthy(&self.health).await {
-                        return true;
-                    }
-                    tokio::time::sleep(Duration::from_millis(200)).await;
+                if !ready_rx.await.unwrap_or(false) || active.exited() {
+                    return false;
                 }
+                active.healthy(&self.health).await
             })
             .await
             .unwrap_or(false);
@@ -402,6 +415,18 @@ async fn pick_local_port() -> Result<u16, AppCommandError> {
     })
 }
 
+// Consume only a bounded banner before the machine-readable acknowledgement.
+async fn read_forward_ready(stdout: &mut (impl AsyncRead + Unpin)) -> bool {
+    let mut lines = BufReader::new(stdout.take(64 * 1024)).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if line == TUNNEL_READY_LINE {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(test)]
 async fn tunnel_port_open(port: u16) -> bool {
     matches!(
         tokio::time::timeout(
@@ -416,6 +441,16 @@ async fn tunnel_port_open(port: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn forwarding_needs_an_ack_not_just_an_open_port() {
+        let mut good = &b"login banner\nCODEG_TUNNEL_READY\n"[..];
+        assert!(read_forward_ready(&mut good).await);
+        let mut unrelated = &b"HTTP/1.1 200 OK\n"[..];
+        assert!(!read_forward_ready(&mut unrelated).await);
+        let large = vec![b'x'; 128 * 1024];
+        assert!(!read_forward_ready(&mut large.as_slice()).await);
+    }
 
     #[tokio::test]
     async fn port_probe_distinguishes_listening_from_closed() {

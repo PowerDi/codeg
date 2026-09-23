@@ -48,6 +48,8 @@ fn base_options() -> Vec<(&'static str, String)> {
         ("NumberOfPasswordPrompts", "0".to_string()),
         // `ssh` must not read a terminal even if one is somehow attached.
         ("RequestTTY", "no".to_string()),
+        ("SessionType", "default".to_string()),
+        ("StdinNull", "no".to_string()),
         ("ExitOnForwardFailure", "yes".to_string()),
         // Opt out of connection multiplexing, explicitly.
         //
@@ -151,8 +153,9 @@ pub fn build_ssh_args(
             args.push(OsString::from(format!(
                 "ConnectTimeout={CONNECT_TIMEOUT_SECS}"
             )));
-            // `-N` (no remote command) + `-T` (no pty): a pure forwarder.
-            args.push(OsString::from("-N"));
+            // A tiny remote command acknowledges forwarding setup, then
+            // waits for stdin EOF. Do not use -N: that would suppress its ack.
+            args.extend(["-o", "ClearAllForwardings=no"].into_iter().map(OsString::from));
             args.push(OsString::from("-T"));
             args.push(OsString::from("-L"));
             args.push(OsString::from(format!(
@@ -348,7 +351,9 @@ mod tests {
             .map(|i| args[i + 1].clone())
             .expect("-L present");
         assert_eq!(forward, "127.0.0.1:51000:127.0.0.1:3080");
-        assert!(args.contains(&"-N".to_string()));
+        assert!(!args.contains(&"-N".to_string()));
+        assert!(args.contains(&"ClearAllForwardings=no".to_string()));
+        assert!(args.contains(&"StdinNull=no".to_string()));
         assert!(args.contains(&"ExitOnForwardFailure=yes".to_string()));
     }
 

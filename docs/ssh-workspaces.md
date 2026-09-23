@@ -18,7 +18,7 @@ This is not an SFTP mount or local execution against remote files.
 
 ## Prerequisites
 
-- Desktop Codeg and the system `ssh` executable on PATH. On Windows, enable
+- Desktop Codeg and system OpenSSH 8.9 or newer (`ssh` on PATH). On Windows, enable
   **OpenSSH Client** in Optional Features.
 - A Linux x86_64 or aarch64 host compatible with the upstream glibc binary.
   Alpine/musl, macOS and Windows remote hosts are outside this phase.
@@ -84,7 +84,9 @@ requires that server's actual URL and token, never a remembered tunnel address.
 - The server listens on remote loopback; the managed tunnel listens on local
   loopback. Requests to the tunnel bypass HTTP proxy settings. SSH encrypts
   traffic between the machines. No additional public server port is needed.
-- An authenticated health response supplies readiness and version. The client
+- A machine-readable SSH acknowledgement confirms forwarding setup before any
+  bearer credential is sent to the selected local port. An authenticated health
+  response then supplies readiness and version. The client
   does not scrape human-readable server logs for ports or tokens. SSH output
   and operation time are bounded, and diagnostic token patterns are redacted.
 - Only the locator is saved locally. Runtime tokens and ports remain in Rust
