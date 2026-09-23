@@ -23,6 +23,9 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+# Disposable fixture only. Production passwords never use environment variables.
+test_password="$(openssl rand -hex 24)"
+printf '%s:%s\n' "$test_user" "$test_password" | sudo chpasswd
 ssh-keygen -q -t ed25519 -N '' -f "$root/client"
 ssh-keygen -q -t ed25519 -N '' -f "$root/host"
 sudo install -d -m 700 -o "$test_user" -g "$test_user" "$home/.ssh"
@@ -34,7 +37,7 @@ ListenAddress 127.0.0.1
 HostKey $root/host
 PidFile $root/sshd.pid
 AuthorizedKeysFile .ssh/authorized_keys
-PasswordAuthentication no
+PasswordAuthentication yes
 KbdInteractiveAuthentication no
 PermitEmptyPasswords no
 UsePAM no
@@ -65,7 +68,30 @@ Host codeg-ssh-ci
   ControlPersist 60
   ControlPath $root/control-%r-%h-%p
 EOF
+ssh-keygen -q -t ed25519 -N '' -f "$root/unrelated-host"
+printf '[127.0.0.1]:%s %s\n' "$port" "$(cat "$root/unrelated-host.pub")" > "$root/changed_known_hosts"
+cat >> "$HOME/.ssh/config" <<EOF
+
+Host codeg-ssh-password-ci codeg-ssh-changed-ci
+  HostName 127.0.0.1
+  User $test_user
+  Port $port
+  IdentityFile none
+  IdentityAgent none
+  PubkeyAuthentication no
+  PasswordAuthentication yes
+Host codeg-ssh-password-ci
+  UserKnownHostsFile $root/password_known_hosts
+Host codeg-ssh-changed-ci
+  UserKnownHostsFile $root/changed_known_hosts
+EOF
 chmod 600 "$HOME/.ssh/config"
+export CODEG_SSH_TEST_PASSWORD="$test_password"
+export CODEG_SSH_TEST_FINGERPRINT="$(ssh-keygen -lf "$root/host.pub" -E sha256 | awk '{print $2}')"
 export CODEG_SSH_TEST_HOST=codeg-ssh-ci
 cd src-tauri
 cargo test --features test-utils --lib isolated_sshd_install_reuse_tunnel_and_reconnect -- --ignored --nocapture
+
+cargo build --no-default-features --bin codeg-mcp
+export CODEG_SSH_TEST_HELPER="$PWD/target/debug/codeg-mcp"
+cargo test --features test-utils --lib isolated_sshd_password_host_trust_and_helper -- --ignored --nocapture

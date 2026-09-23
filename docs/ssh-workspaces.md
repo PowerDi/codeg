@@ -22,14 +22,16 @@ This is not an SFTP mount or local execution against remote files.
   **OpenSSH Client** in Optional Features.
 - A Linux x86_64 or aarch64 host compatible with the upstream glibc binary.
   Alpine/musl, macOS and Windows remote hosts are outside this phase.
-- Working key or ssh-agent authentication. Load encrypted keys into the agent
-  first. Password and MFA prompts cannot be answered by the application.
+- Key/ssh-agent authentication or a password-enabled SSH account. Codeg asks
+  for login passwords and encrypted-key passphrases in its own dialog when
+  OpenSSH needs them. Keyboard-interactive MFA is not supported.
 - A writable remote home directory, standard Linux utilities, `curl`, `tar`,
   `flock`, and `sha256sum` (or `shasum`). The remote host needs HTTPS access to
   GitHub release assets.
-- Verify the host fingerprint through a trusted source, then connect once in a
-  terminal to add the correct key to `known_hosts`. Unknown or changed keys
-  are rejected. Codeg never automatically accepts them.
+- Verify the host fingerprint through a trusted source. On first connection,
+  Codeg displays OpenSSH's complete host/fingerprint prompt for explicit trust.
+  OpenSSH then updates `known_hosts`. Changed host keys are still rejected;
+  Codeg never automatically accepts a new or changed key.
 
 An SSH config alias is usually the simplest setup:
 
@@ -41,7 +43,7 @@ Host build-box
   IdentityFile ~/.ssh/id_ed25519
 ```
 
-Verify noninteractive access first:
+For key-based setups, optionally verify noninteractive access first:
 
 ```sh
 ssh -o BatchMode=yes -o StrictHostKeyChecking=yes build-box true
@@ -61,11 +63,39 @@ processes; its forwards are not delegated to a user-owned ControlMaster.
    A blank port does not override an alias with port 22. The identity field is
    a local file path, not the private key contents.
 5. Optionally **Test connection**, then **Save** and open the connection.
+6. If prompted, verify the host fingerprint and enter the login password or key
+   passphrase. Password input is masked and whitespace is preserved. A test,
+   save, or newly opened workspace can each require authentication.
 
 Both Test and Save can install/start the remote server. The first operation can
 take several minutes, and the form stays disabled while it runs. SSH profiles
 have no manually entered bearer token or custom HTTP headers. Switching to HTTP
 requires that server's actual URL and token, never a remembered tunnel address.
+
+## Password and host-key dialogs
+
+The desktop keeps using system OpenSSH, including your config aliases and jump
+hosts. It forces an app-owned askpass helper instead of opening a hidden console,
+putting a password on stdin, using `sshpass`, or weakening host-key checking.
+The built desktop executable handles askpass before starting logging or Tauri.
+
+- Answers go over a bounded, authenticated loopback IPC channel. The helper's
+  environment contains only an ephemeral capability and endpoint, never a
+  password. Only the initiating app window may answer a prompt.
+- Passwords/passphrases are kept in zeroizing Rust memory for the current
+  connection, allowing bootstrap, tunnel setup and reconnect to reuse them.
+  They are never added to saved profiles, command arguments, logs, files or
+  browser storage. Closing the last workspace window, editing/deleting its
+  profile, or exiting the app clears them. Temporary test/save credentials are
+  discarded when that operation ends.
+- Cached answers are scoped to the profile/configuration and the exact OpenSSH
+  prompt, so different destination users, jump hosts and key files do not share
+  an answer. Host-key approvals are not cached by Codeg.
+- Cancel and unanswered prompts fail closed. Cancelling a live session's prompt
+  suppresses further automatic prompts for that session; close and reopen its
+  workspace to try again. A missing/closed window also cancels its prompt.
+- A changed host key is refused before password authentication. Verify the new
+  key independently before correcting `known_hosts`; there is no bypass button.
 
 ## Installation, security and lifetime
 
@@ -105,8 +135,10 @@ requires that server's actual URL and token, never a remembered tunnel address.
 ## Recovery and limitations
 
 - Missing client: install OpenSSH Client and ensure it is visible on PATH.
-- Authentication/host key: fix noninteractive access in a terminal. Do not turn
-  off fingerprint verification to work around a mismatch.
+- Authentication: check the username/password, server password policy, or key.
+  For keyboard-interactive-only or MFA accounts, use a supported public key.
+- Host key: confirm a new fingerprint in the app only after independent
+  verification. Do not disable checking to work around a changed-key warning.
 - Download/checksum failure: check remote HTTPS access and whether upstream
   published the desktop's exact version/architecture. There is no remote build
   or unverified download fallback. Offline and custom-source installs are not
@@ -121,8 +153,8 @@ requires that server's actual URL and token, never a remembered tunnel address.
 - Profiles on the same remote account share the installation and data. Use
   separate accounts when separate remote data environments are needed.
 - This phase forwards the Codeg API/WebSocket port only. Arbitrary development
-  servers, multi-port browser previews, interactive SSH authentication, and
-  SSH profile management in web/server mode are not supported.
+  servers, multi-port browser previews, keyboard-interactive MFA, and SSH profile
+  management in web/server mode are not supported.
 
 ## Verification
 
@@ -141,3 +173,10 @@ user private key, real server or remote data. Its harness is
 These automated checks do not replace testing the built Windows desktop with
 your SSH configuration, agent and network. Browser previews and every agent
 provider are not covered end to end.
+
+Password regressions additionally exercise the real helper against the isolated
+sshd: explicit trust/decline, password-only bootstrap, an authenticated forward,
+cache reuse/clearing, wrong passwords and changed-key refusal. The Windows build
+runs `scripts/ssh-password-windows-smoke.py` with a disposable Paramiko loopback
+server to check native Windows OpenSSH, the built GUI-subsystem helper, and an
+executable path containing spaces. This still does not replace manual UI QA.

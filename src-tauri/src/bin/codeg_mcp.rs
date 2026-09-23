@@ -179,6 +179,12 @@ async fn write_response(
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
+    // The same askpass client as the desktop entry point. Also permits the
+    // isolated SSH tests to exercise the real helper without starting a GUI.
+    if let Some(code) = codeg_lib::ssh::askpass_client::run_if_requested() {
+        return ExitCode::from(code);
+    }
+
     // Stderr-only subscriber: stdout is the JSON-RPC protocol channel, and
     // concurrent mcp processes share no log file. No hub/buffer/emitter.
     let _log_guard = codeg_lib::logging::init::init_mcp();

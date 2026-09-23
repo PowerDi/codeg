@@ -19,7 +19,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use crate::app_error::AppCommandError;
 use crate::models::RemoteWorkspaceSshConfig;
-use crate::ssh::command::{ssh_command, SshInvocation};
+use crate::ssh::command::{ssh_command_with_askpass, SshInvocation};
 use crate::ssh::redact::redact_secrets;
 
 /// The remote script. Compiled in, so the desktop binary is self-contained and
@@ -239,9 +239,16 @@ fn payload_with_script(version: &str, script: &str) -> String {
 pub async fn run_bootstrap(
     config: &RemoteWorkspaceSshConfig,
 ) -> Result<BootstrapOutcome, AppCommandError> {
+    run_bootstrap_with_askpass(config, None).await
+}
+
+pub async fn run_bootstrap_with_askpass(
+    config: &RemoteWorkspaceSshConfig,
+    askpass: Option<&crate::ssh::askpass::AskpassServer>,
+) -> Result<BootstrapOutcome, AppCommandError> {
     // `sh -s` reads the program from stdin. The remote argv therefore carries no
     // user data and no script text at all.
-    let mut command = ssh_command(config, SshInvocation::Exec, Some("sh -s"));
+    let mut command = ssh_command_with_askpass(config, SshInvocation::Exec, Some("sh -s"), askpass);
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -250,10 +257,12 @@ pub async fn run_bootstrap(
         .kill_on_drop(true);
 
     let payload = bootstrap_payload(requested_version());
-    let output = bounded_ssh_output(command, payload.as_bytes(), BOOTSTRAP_TIMEOUT).await?;
-
+    let output = bounded_ssh_output(command, payload.as_bytes(), BOOTSTRAP_TIMEOUT).await;
+    if let Some(error) = askpass.and_then(|auth| auth.failure()) { return Err(error); }
+    let output = output?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = askpass.map_or_else(|| stderr.to_string(), |auth| auth.redact(&stderr));
 
     if !output.status.success() && !stdout.contains(RESULT_SENTINEL) {
         return Err(crate::ssh::command::classify_ssh_failure(

@@ -13,6 +13,7 @@ import { OverlayScrollbarsInit } from "@/components/overlay-scrollbars-init"
 import { ClipboardFallbackInit } from "@/components/clipboard-fallback-init"
 import { WebConnectionGuard } from "@/components/connection/web-connection-guard"
 import { WindowResizeGrips } from "@/components/layout/window-resize-grips"
+import { SshAuthDialog } from "@/components/layout/ssh-auth-dialog"
 import { CloseRequestDialog } from "@/components/workspace/close-request-dialog"
 
 export const viewport: Viewport = {
@@ -78,6 +79,7 @@ export default async function RootLayout({
                     (/workspace, /login, the redirecting /) must be able to
                     answer a close press. */}
                 <CloseRequestDialog />
+                <SshAuthDialog />
                 {children}
               </AppearanceProvider>
             </ThemeProvider>

@@ -4660,8 +4660,8 @@
     "sshPort": "連接埠（選填）",
     "sshIdentityFile": "私密金鑰檔案路徑（選填）",
     "sshConfigDefault": "使用 SSH 設定",
-    "sshHelp": "Codeg 將透過 SSH 安裝相符版本的 Linux 伺服器並在背景執行。請先在終端設定金鑰或 ssh-agent 驗證並確認主機金鑰。測試或儲存連線時可能會安裝伺服器。",
-    "sshOptionalHint": "選填欄位留空時沿用 SSH 設定。不支援密碼提示，無需貼上存取權杖。關閉應用程式只會中斷本機通道，遠端代理仍會繼續執行。",
+    "sshHelp": "Codeg 透過 SSH 安裝相符的 Linux 服務端。支援金鑰、ssh-agent 或密碼對話框；首次連線可在應用程式內核對指紋。測試或儲存時可能安裝服務端。",
+    "sshOptionalHint": "密碼僅於連線期間保留在記憶體中，關閉後清除，不會儲存至設定。",
     "sshConnecting": "正在準備 SSH 連線…首次安裝可能需要幾分鐘。",
     "testConnection": "測試連線",
     "testSucceeded": "連線測試成功。",
@@ -4673,7 +4673,21 @@
     "sshUsernameInvalid": "請輸入有效的 SSH 使用者名稱，不要包含命令選項或空格。",
     "sshPortInvalid": "請輸入 1 至 65535 的整數連接埠，或留空。",
     "sshIdentityInvalid": "請輸入金鑰檔案路徑，不要包含控制字元或以連字號開頭。",
-    "sshConnectionExpired": "SSH 連線「{name}」無法使用。請檢查設定並重新開啟工作區。"
+    "sshConnectionExpired": "SSH 連線「{name}」無法使用。請檢查設定並重新開啟工作區。",
+    "auth": {
+      "passwordTitle": "SSH 登入密碼",
+      "passphraseTitle": "SSH 私鑰密語",
+      "hostKeyTitle": "確認 SSH 主機指紋",
+      "target": "正在連線至 {host}。",
+      "verifyHost": "請透過可信管道核對指紋。變更的主機金鑰不會自動接受。",
+      "sessionOnly": "密碼僅於連線期間保留在記憶體中，關閉後清除，不會儲存至設定。",
+      "passwordLabel": "登入密碼",
+      "passphraseLabel": "私鑰密語",
+      "connect": "連線",
+      "trust": "信任主機並連線",
+      "cancel": "取消",
+      "failed": "無法提交驗證資訊，請重試。"
+    }
   },
   "ServerFileBrowser": {
     "title": "選擇伺服器檔案",

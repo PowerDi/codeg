@@ -4660,8 +4660,8 @@
     "sshPort": "Porta (opcional)",
     "sshIdentityFile": "Caminho da chave privada (opcional)",
     "sshConfigDefault": "Usar configuração SSH",
-    "sshHelp": "O Codeg instala via SSH a versão correspondente do servidor Linux e a executa em segundo plano. Configure primeiro a autenticação por chave ou ssh-agent e verifique a chave do host no terminal. Testar ou salvar pode instalar o servidor.",
-    "sshOptionalHint": "Campos opcionais vazios usam a configuração SSH. Não há suporte a solicitações de senha nem é preciso colar um token. Fechar o aplicativo encerra apenas os túneis locais; os agentes remotos continuam executando.",
+    "sshHelp": "Codeg instala o servidor Linux por SSH. Use chave/ssh-agent ou senha. Confirme novas impressões digitais no aplicativo. Testar ou salvar pode instalar o servidor.",
+    "sshOptionalHint": "Os segredos ficam na memória apenas durante a conexão. Não são salvos no perfil.",
     "sshConnecting": "Preparando conexão SSH… A primeira instalação pode levar alguns minutos.",
     "testConnection": "Testar conexão",
     "testSucceeded": "Teste de conexão concluído com sucesso.",
@@ -4673,7 +4673,21 @@
     "sshUsernameInvalid": "Insira um usuário SSH válido, sem opções ou espaços.",
     "sshPortInvalid": "Insira uma porta inteira de 1 a 65535 ou deixe em branco.",
     "sshIdentityInvalid": "Insira um caminho de chave sem caracteres de controle ou hífen inicial.",
-    "sshConnectionExpired": "A conexão SSH \"{name}\" está indisponível. Verifique o perfil e reabra o espaço de trabalho."
+    "sshConnectionExpired": "A conexão SSH \"{name}\" está indisponível. Verifique o perfil e reabra o espaço de trabalho.",
+    "auth": {
+      "passwordTitle": "Senha SSH",
+      "passphraseTitle": "Frase secreta SSH",
+      "hostKeyTitle": "Verificar impressão digital SSH",
+      "target": "Conectando a {host}.",
+      "verifyHost": "Verifique a impressão digital por um canal confiável. Chaves alteradas nunca são aceitas automaticamente.",
+      "sessionOnly": "Os segredos ficam na memória apenas durante a conexão. Não são salvos no perfil.",
+      "passwordLabel": "Senha",
+      "passphraseLabel": "Frase secreta",
+      "connect": "Conectar",
+      "trust": "Confiar e conectar",
+      "cancel": "Cancelar",
+      "failed": "Não foi possível enviar a resposta. Tente novamente."
+    }
   },
   "ServerFileBrowser": {
     "title": "Selecionar arquivo do servidor",

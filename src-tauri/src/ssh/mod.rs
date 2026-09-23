@@ -1,6 +1,9 @@
 //! SSH-managed remote workspaces. Validation also runs in the server build,
 //! since both runtimes share the database schema. Process/tunnel ownership is
 //! desktop-only; the remote server needs no SSH capability or protocol change.
+pub mod askpass_client;
+#[cfg(feature = "tauri-runtime")]
+pub mod askpass;
 #[cfg(feature = "tauri-runtime")]
 pub mod bootstrap;
 #[cfg(feature = "tauri-runtime")]

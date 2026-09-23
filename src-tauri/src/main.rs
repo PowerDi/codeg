@@ -2,6 +2,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    // OpenSSH launches this executable with a short-lived, authenticated IPC
+    // endpoint, never a password. Exit before logging, plugins or the GUI.
+    if let Some(code) = codeg_lib::ssh::askpass_client::run_if_requested() {
+        std::process::exit(i32::from(code));
+    }
+
     // When called as a git credential helper, handle it immediately and exit.
     // This avoids starting the full Tauri GUI runtime.
     if std::env::args().any(|a| a == "--credential-helper") {

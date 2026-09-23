@@ -57,7 +57,7 @@ jobs:
         run: |
           rustfmt --edition 2021 --config skip_children=true \
             src-tauri/src/ssh/*.rs \
-            src-tauri/src/lib.rs src-tauri/src/models/mod.rs \
+            src-tauri/src/lib.rs src-tauri/src/main.rs src-tauri/src/bin/codeg_mcp.rs src-tauri/src/models/mod.rs \
             src-tauri/src/models/remote_workspace_connection.rs \
             src-tauri/src/commands/remote_workspace.rs src-tauri/src/commands/remote_proxy.rs \
             src-tauri/src/db/entities/remote_workspace_connection.rs \

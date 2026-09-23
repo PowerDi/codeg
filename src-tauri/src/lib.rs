@@ -1649,6 +1649,8 @@ mod tauri_app {
                 remote_workspace_commands::update_remote_workspace_connection,
                 remote_workspace_commands::delete_remote_workspace_connection,
                 remote_workspace_commands::test_remote_workspace_connection,
+                remote_workspace_commands::list_ssh_auth_prompts,
+                remote_workspace_commands::answer_ssh_auth_prompt,
                 remote_workspace_commands::get_remote_workspace_connection,
                 remote_workspace_commands::reorder_remote_workspace_connections,
                 remote_workspace_commands::open_remote_workspace,

@@ -116,6 +116,16 @@ jobs:
           $config = (Resolve-Path -LiteralPath "src-tauri/tauri.windows-test.conf.json").Path
           pnpm tauri build --target $env:TARGET --bundles nsis --config "$config"
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify native Windows SSH password authentication
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check paramiko==3.5.1
+          python scripts/ssh-password-windows-smoke.py "src-tauri/target/$env:TARGET/release/codeg.exe"
+
       - name: Collect NSIS installer
         id: collect
         shell: pwsh

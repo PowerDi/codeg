@@ -16,8 +16,9 @@ use tokio_util::sync::CancellationToken;
 use crate::app_error::AppCommandError;
 use crate::db::service::remote_workspace_connection_service;
 use crate::models::{RemoteWorkspaceConnectionInfo, RemoteWorkspaceSshConfig};
-use crate::ssh::bootstrap::{run_bootstrap, BootstrapOutcome};
-use crate::ssh::command::{ssh_command, SshInvocation};
+use crate::ssh::askpass::{AskpassServer, CredentialCache, PromptBroker};
+use crate::ssh::bootstrap::{run_bootstrap_with_askpass, BootstrapOutcome};
+use crate::ssh::command::{ssh_command_with_askpass, SshInvocation};
 
 const TUNNEL_READY_TIMEOUT: Duration = Duration::from_secs(25);
 const HEALTH_INTERVAL: Duration = Duration::from_secs(3);
@@ -82,6 +83,9 @@ impl ActiveTunnel {
 
 struct SshSession {
     tunnel: Mutex<Option<ActiveTunnel>>,
+    credentials: Arc<CredentialCache>,
+    auth_config: StdMutex<Option<RemoteWorkspaceSshConfig>>,
+    prompt_window: StdMutex<Option<String>>,
     cancelled: CancellationToken,
 }
 
@@ -89,6 +93,9 @@ impl SshSession {
     fn new() -> Self {
         Self {
             tunnel: Mutex::new(None),
+            credentials: Arc::new(CredentialCache::default()),
+            auth_config: StdMutex::new(None),
+            prompt_window: StdMutex::new(None),
             cancelled: CancellationToken::new(),
         }
     }
@@ -108,6 +115,7 @@ impl SshSession {
 
     async fn stop(&self) {
         self.cancelled.cancel();
+        self.credentials.clear();
         if let Some(mut active) = self.tunnel.lock().await.take() {
             let _ = active.child.kill().await;
         }
@@ -126,6 +134,7 @@ pub struct SshManager {
     // Never held across an await. Window destruction can cancel synchronously,
     // before a new window with the same label registers a different instance.
     state: StdMutex<ManagerState>,
+    pub(crate) prompts: Arc<PromptBroker>,
     health: reqwest::Client,
     cancelled: CancellationToken,
 }
@@ -134,6 +143,7 @@ impl SshManager {
     pub fn new() -> Self {
         Self {
             state: StdMutex::new(ManagerState::default()),
+            prompts: Arc::new(PromptBroker::default()),
             cancelled: CancellationToken::new(),
             health: reqwest::Client::builder()
                 .no_proxy()
@@ -154,6 +164,24 @@ impl SshManager {
             .entry(id)
             .or_insert_with(|| Arc::new(SshSession::new()))
             .clone())
+    }
+
+    pub fn set_prompt_window(&self, id: i32, label: &str) {
+        if let Ok(session) = self.session(id) {
+            *session.prompt_window.lock().unwrap() = Some(label.to_string());
+        }
+    }
+
+    async fn askpass(
+        &self,
+        config: &RemoteWorkspaceSshConfig,
+        owner_window: &str,
+        credentials: Arc<CredentialCache>,
+    ) -> Result<Option<AskpassServer>, AppCommandError> {
+        // Non-GUI tests keep the existing fail-closed, batch-mode behavior.
+        if !self.prompts.available() { return Ok(None); }
+        let helper = std::env::current_exe().map_err(|_| AppCommandError::io_error("Could not locate the SSH authentication helper"))?;
+        AskpassServer::start(helper, config.host.clone(), owner_window.into(), self.prompts.clone(), credentials).await.map(Some)
     }
 
     pub fn register_window(&self, id: i32, instance: &str) {
@@ -208,6 +236,7 @@ impl SshManager {
                     })?;
                 let Some(config) = connection.ssh.as_ref() else {
                     *tunnel = None;
+                    session.credentials.clear();
                     return Ok(connection);
                 };
                 let reusable = match tunnel.as_mut() {
@@ -216,8 +245,22 @@ impl SshManager {
                 };
                 if !reusable {
                     *tunnel = None;
-                    let outcome = run_bootstrap(config).await?;
-                    *tunnel = Some(self.open_tunnel(config, &outcome).await?);
+                    {
+                        let mut previous = session.auth_config.lock().unwrap();
+                        if previous.as_ref() != Some(config) {
+                            session.credentials.clear();
+                            *previous = Some(config.clone());
+                        }
+                    }
+                    let window = session.prompt_window.lock().unwrap().clone()
+                        .unwrap_or_else(|| format!("remote-workspace-{id}"));
+                    let askpass = self.askpass(config, &window, session.credentials.clone()).await?;
+                    let result = async {
+                        let outcome = run_bootstrap_with_askpass(config, askpass.as_ref()).await?;
+                        self.open_tunnel(config, &outcome, askpass.as_ref()).await
+                    }.await;
+                    if result.is_err() { session.credentials.clear(); }
+                    *tunnel = Some(result?);
                 }
                 let active = tunnel.as_ref().expect("tunnel established above");
                 connection.base_url = active.base_url();
@@ -233,13 +276,22 @@ impl SshManager {
         &self,
         config: &RemoteWorkspaceSshConfig,
     ) -> Result<(), AppCommandError> {
+        self.test_config_for_window(config, "main").await
+    }
+
+    pub async fn test_config_for_window(
+        &self,
+        config: &RemoteWorkspaceSshConfig,
+        owner_window: &str,
+    ) -> Result<(), AppCommandError> {
         tokio::select! {
             biased;
             _ = self.cancelled.cancelled() => Err(AppCommandError::network("The desktop is shutting down")),
             result = async {
                 let config = crate::ssh::config::validate_ssh_config(config)?;
-                let outcome = run_bootstrap(&config).await?;
-                let mut tunnel = self.open_tunnel(&config, &outcome).await?;
+                let askpass = self.askpass(&config, owner_window, Arc::new(CredentialCache::default())).await?;
+                let outcome = run_bootstrap_with_askpass(&config, askpass.as_ref()).await?;
+                let mut tunnel = self.open_tunnel(&config, &outcome, askpass.as_ref()).await?;
                 let _ = tunnel.child.kill().await;
                 Ok(())
             } => result,
@@ -250,17 +302,19 @@ impl SshManager {
         &self,
         config: &RemoteWorkspaceSshConfig,
         outcome: &BootstrapOutcome,
+        askpass: Option<&AskpassServer>,
     ) -> Result<ActiveTunnel, AppCommandError> {
         let mut detail = String::new();
         for _ in 0..3 {
             let local_port = pick_local_port().await?;
-            let mut command = ssh_command(
+            let mut command = ssh_command_with_askpass(
                 config,
                 SshInvocation::Tunnel {
                     local_port,
                     remote_port: outcome.port,
                 },
                 Some(TUNNEL_COMMAND),
+                askpass,
             );
             command
                 .stdin(std::process::Stdio::piped())
@@ -307,7 +361,8 @@ impl SshManager {
                 stderr_task,
                 stdout_task,
             };
-            let ready = tokio::time::timeout(TUNNEL_READY_TIMEOUT, async {
+            let ready_timeout = if askpass.is_some() { Duration::from_secs(240) } else { TUNNEL_READY_TIMEOUT };
+            let ready = tokio::time::timeout(ready_timeout, async {
                 if !ready_rx.await.unwrap_or(false) || active.exited() {
                     return false;
                 }
@@ -323,7 +378,12 @@ impl SshManager {
                 return Ok(active);
             }
             detail = active.error_detail();
+            if let Some(auth) = askpass { detail = auth.redact(&detail); }
             let _ = active.child.kill().await;
+            if let Some(error) = askpass.and_then(|auth| auth.failure()) { return Err(error); }
+            if detail.to_ascii_lowercase().contains("permission denied") {
+                return Err(crate::ssh::command::classify_ssh_failure(&detail, None));
+            }
         }
         Err(
             AppCommandError::network("Could not establish an authenticated SSH tunnel")
@@ -333,6 +393,17 @@ impl SshManager {
                     detail
                 }),
         )
+    }
+
+    /// Network reconnects retire only the tunnel, not the session's in-memory
+    /// password or prompt owner. Edit/delete/last-window-close still clear all.
+    pub async fn reset_tunnel(&self, id: i32) {
+        let session = self.state.lock().unwrap().sessions.get(&id).cloned();
+        if let Some(session) = session {
+            if let Some(mut active) = session.tunnel.lock().await.take() {
+                let _ = active.child.kill().await;
+            }
+        }
     }
 
     pub async fn shutdown(&self, id: i32) {

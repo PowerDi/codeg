@@ -4660,8 +4660,8 @@
     "sshPort": "Port (optional)",
     "sshIdentityFile": "Pfad zur privaten Schlüsseldatei (optional)",
     "sshConfigDefault": "SSH-Konfiguration verwenden",
-    "sshHelp": "Codeg installiert über SSH die passende Linux-Serverversion und startet sie im Hintergrund. Richten Sie zuerst die Schlüssel- oder ssh-agent-Anmeldung ein und prüfen Sie den Hostschlüssel im Terminal. Testen oder Speichern kann den Server installieren.",
-    "sshOptionalHint": "Leere optionale Felder übernehmen die SSH-Konfiguration. Passwortabfragen werden nicht unterstützt; ein Token muss nicht eingefügt werden. Beim Schließen der App enden nur lokale Tunnel, entfernte Agenten laufen weiter.",
+    "sshHelp": "Codeg installiert den Linux-Server per SSH. Nutzen Sie Schlüssel/ssh-agent oder das Passwortdialogfeld. Neue Fingerabdrücke werden in der App bestätigt. Testen oder Speichern kann den Server installieren.",
+    "sshOptionalHint": "Zugangsdaten bleiben nur für diese Verbindung im Arbeitsspeicher und werden danach gelöscht. Sie werden nicht im Profil gespeichert.",
     "sshConnecting": "SSH-Verbindung wird vorbereitet… Die Erstinstallation kann einige Minuten dauern.",
     "testConnection": "Verbindung testen",
     "testSucceeded": "Verbindungstest erfolgreich.",
@@ -4673,7 +4673,21 @@
     "sshUsernameInvalid": "Geben Sie einen gültigen SSH-Benutzernamen ohne Optionen oder Leerzeichen ein.",
     "sshPortInvalid": "Geben Sie einen ganzzahligen Port von 1 bis 65535 ein oder lassen Sie das Feld leer.",
     "sshIdentityInvalid": "Geben Sie einen Schlüsselpfad ohne Steuerzeichen oder führenden Bindestrich ein.",
-    "sshConnectionExpired": "Die SSH-Verbindung „{name}“ ist nicht verfügbar. Prüfen Sie das Profil und öffnen Sie den Arbeitsbereich erneut."
+    "sshConnectionExpired": "Die SSH-Verbindung „{name}“ ist nicht verfügbar. Prüfen Sie das Profil und öffnen Sie den Arbeitsbereich erneut.",
+    "auth": {
+      "passwordTitle": "SSH-Passwort",
+      "passphraseTitle": "SSH-Schlüssel-Passphrase",
+      "hostKeyTitle": "SSH-Fingerabdruck prüfen",
+      "target": "Verbindung zu {host}.",
+      "verifyHost": "Prüfen Sie den Fingerabdruck über einen vertrauenswürdigen Kanal. Geänderte Schlüssel werden nie automatisch akzeptiert.",
+      "sessionOnly": "Zugangsdaten bleiben nur für diese Verbindung im Arbeitsspeicher und werden danach gelöscht. Sie werden nicht im Profil gespeichert.",
+      "passwordLabel": "Passwort",
+      "passphraseLabel": "Schlüssel-Passphrase",
+      "connect": "Verbinden",
+      "trust": "Host vertrauen und verbinden",
+      "cancel": "Abbrechen",
+      "failed": "Die Antwort konnte nicht gesendet werden. Bitte erneut versuchen."
+    }
   },
   "ServerFileBrowser": {
     "title": "Serverdatei auswählen",

@@ -1847,7 +1847,7 @@ async fn run_ws_task(
                 }
                 fail_count = fail_count.saturating_add(1);
                 if ssh_mode {
-                    proxy.ssh.shutdown(connection_id).await;
+                    proxy.ssh.reset_tunnel(connection_id).await;
                     emit_internal(&app, &entry, &event_name, WS_DISCONNECTED_CHANNEL).await;
                 }
                 if !ssh_mode && fail_count >= WS_RECONNECT_FAIL_THRESHOLD {
@@ -1929,7 +1929,7 @@ async fn run_ws_task(
         *entry.ready.write().await = false;
         emit_internal(&app, &entry, &event_name, WS_DISCONNECTED_CHANNEL).await;
         if ssh_mode {
-            proxy.ssh.shutdown(connection_id).await;
+            proxy.ssh.reset_tunnel(connection_id).await;
         }
         fail_count = fail_count.saturating_add(1);
         if !ssh_mode && fail_count >= WS_RECONNECT_FAIL_THRESHOLD {

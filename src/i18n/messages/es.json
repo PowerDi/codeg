@@ -4660,8 +4660,8 @@
     "sshPort": "Puerto (opcional)",
     "sshIdentityFile": "Ruta de la clave privada (opcional)",
     "sshConfigDefault": "Usar configuración SSH",
-    "sshHelp": "Codeg instala por SSH la versión correspondiente del servidor Linux y la ejecuta en segundo plano. Configure la autenticación con clave o ssh-agent y verifique la clave del host en una terminal antes de continuar. Probar o guardar puede instalar el servidor.",
-    "sshOptionalHint": "Los campos opcionales vacíos heredan la configuración SSH. No se admiten solicitudes de contraseña ni se necesita pegar un token. Cerrar la aplicación solo cierra los túneles locales; los agentes remotos siguen ejecutándose.",
+    "sshHelp": "Codeg instala el servidor Linux por SSH. Usa clave/ssh-agent o contraseña. Confirma nuevas huellas en la aplicación. Probar o guardar puede instalar el servidor.",
+    "sshOptionalHint": "Los secretos solo permanecen en memoria durante la conexión. No se guardan en el perfil.",
     "sshConnecting": "Preparando la conexión SSH… La primera instalación puede tardar varios minutos.",
     "testConnection": "Probar conexión",
     "testSucceeded": "La prueba de conexión fue correcta.",
@@ -4673,7 +4673,21 @@
     "sshUsernameInvalid": "Introduzca un usuario SSH válido, sin opciones ni espacios.",
     "sshPortInvalid": "Introduzca un puerto entero entre 1 y 65535, o déjelo vacío.",
     "sshIdentityInvalid": "Introduzca una ruta de clave sin caracteres de control ni guion inicial.",
-    "sshConnectionExpired": "La conexión SSH \"{name}\" no está disponible. Revise su configuración y vuelva a abrir el espacio de trabajo."
+    "sshConnectionExpired": "La conexión SSH \"{name}\" no está disponible. Revise su configuración y vuelva a abrir el espacio de trabajo.",
+    "auth": {
+      "passwordTitle": "Contraseña SSH",
+      "passphraseTitle": "Frase de clave SSH",
+      "hostKeyTitle": "Verificar huella SSH",
+      "target": "Conectando a {host}.",
+      "verifyHost": "Verifica la huella por un canal de confianza. Las claves cambiadas nunca se aceptan automáticamente.",
+      "sessionOnly": "Los secretos solo permanecen en memoria durante la conexión. No se guardan en el perfil.",
+      "passwordLabel": "Contraseña",
+      "passphraseLabel": "Frase de clave",
+      "connect": "Conectar",
+      "trust": "Confiar y conectar",
+      "cancel": "Cancelar",
+      "failed": "No se pudo enviar la respuesta. Inténtalo de nuevo."
+    }
   },
   "ServerFileBrowser": {
     "title": "Seleccionar archivo del servidor",

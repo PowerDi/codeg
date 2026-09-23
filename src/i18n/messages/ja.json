@@ -4660,8 +4660,8 @@
     "sshPort": "ポート（任意）",
     "sshIdentityFile": "秘密鍵ファイルのパス（任意）",
     "sshConfigDefault": "SSH 設定を使用",
-    "sshHelp": "Codeg は SSH 経由で対応する Linux サーバーをインストールし、バックグラウンドで起動します。事前に端末で鍵・ssh-agent 認証を設定し、ホスト鍵を確認してください。接続のテストや保存時にサーバーがインストールされる場合があります。",
-    "sshOptionalHint": "任意項目が空欄の場合は SSH 設定を使用します。パスワード入力やトークンの貼り付けは不要です。アプリを閉じてもローカルトンネルのみが終了し、リモートエージェントは動作を続けます。",
+    "sshHelp": "SSH 経由で対応する Linux サーバーをインストールします。鍵・ssh-agent またはパスワードに対応し、初回の指紋はアプリ内で確認します。テストや保存時にインストールする場合があります。",
+    "sshOptionalHint": "認証情報は接続中のみメモリに保持され、切断時に消去されます。設定には保存されません。",
     "sshConnecting": "SSH 接続を準備中…初回インストールには数分かかる場合があります。",
     "testConnection": "接続をテスト",
     "testSucceeded": "接続テストに成功しました。",
@@ -4673,7 +4673,21 @@
     "sshUsernameInvalid": "オプションや空白を含まない有効な SSH ユーザー名を入力してください。",
     "sshPortInvalid": "1～65535 の整数ポートを入力するか、空欄にしてください。",
     "sshIdentityInvalid": "制御文字や先頭のハイフンを含まない鍵ファイルのパスを入力してください。",
-    "sshConnectionExpired": "SSH 接続「{name}」を利用できません。設定を確認してワークスペースを開き直してください。"
+    "sshConnectionExpired": "SSH 接続「{name}」を利用できません。設定を確認してワークスペースを開き直してください。",
+    "auth": {
+      "passwordTitle": "SSH パスワード",
+      "passphraseTitle": "SSH 鍵のパスフレーズ",
+      "hostKeyTitle": "SSH ホストの指紋を確認",
+      "target": "{host} に接続しています。",
+      "verifyHost": "信頼できる方法で指紋を確認してください。変更された鍵は自動承認されません。",
+      "sessionOnly": "認証情報は接続中のみメモリに保持され、切断時に消去されます。設定には保存されません。",
+      "passwordLabel": "パスワード",
+      "passphraseLabel": "鍵のパスフレーズ",
+      "connect": "接続",
+      "trust": "ホストを信頼して接続",
+      "cancel": "キャンセル",
+      "failed": "送信できませんでした。もう一度お試しください。"
+    }
   },
   "ServerFileBrowser": {
     "title": "サーバーファイルを選択",

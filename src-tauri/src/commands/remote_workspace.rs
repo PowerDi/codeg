@@ -118,19 +118,22 @@ pub async fn get_remote_workspace_connection(
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
 pub async fn test_remote_workspace_connection(
+    window: tauri::WebviewWindow,
     proxy: tauri::State<'_, Arc<RemoteProxyState>>,
     input: RemoteWorkspaceConnectionInput,
 ) -> Result<(), AppCommandError> {
-    validate_connection(&proxy, &input).await
+    proxy.ssh.prompts.bind_app(window.app_handle());
+    validate_connection(&proxy, &input, window.label()).await
 }
 
 #[cfg(feature = "tauri-runtime")]
 async fn validate_connection(
     proxy: &RemoteProxyState,
     input: &RemoteWorkspaceConnectionInput,
+    owner_window: &str,
 ) -> Result<(), AppCommandError> {
     match &input.ssh {
-        Some(config) => proxy.ssh.test_config(config).await,
+        Some(config) => proxy.ssh.test_config_for_window(config, owner_window).await,
         None => validate_remote_health(&input.base_url, &input.token, &input.headers).await,
     }
 }
@@ -138,6 +141,7 @@ async fn validate_connection(
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
 pub async fn create_remote_workspace_connection(
+    window: tauri::WebviewWindow,
     db: tauri::State<'_, AppDatabase>,
     proxy: tauri::State<'_, Arc<RemoteProxyState>>,
     input: RemoteWorkspaceConnectionInput,
@@ -147,7 +151,8 @@ pub async fn create_remote_workspace_connection(
             "Remote connection name is required",
         ));
     }
-    validate_connection(&proxy, &input).await?;
+    proxy.ssh.prompts.bind_app(window.app_handle());
+    validate_connection(&proxy, &input, window.label()).await?;
     remote_workspace_connection_service::create(
         &db.conn,
         &input.name,
@@ -162,6 +167,7 @@ pub async fn create_remote_workspace_connection(
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
 pub async fn update_remote_workspace_connection(
+    window: tauri::WebviewWindow,
     db: tauri::State<'_, AppDatabase>,
     proxy: tauri::State<'_, Arc<RemoteProxyState>>,
     id: i32,
@@ -172,7 +178,8 @@ pub async fn update_remote_workspace_connection(
             "Remote connection name is required",
         ));
     }
-    validate_connection(&proxy, &input).await?;
+    proxy.ssh.prompts.bind_app(window.app_handle());
+    validate_connection(&proxy, &input, window.label()).await?;
     let updated = remote_workspace_connection_service::update(
         &db.conn,
         id,
@@ -213,6 +220,7 @@ pub async fn reorder_remote_workspace_connections(
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
 pub async fn open_remote_workspace(
+    window: tauri::WebviewWindow,
     app: AppHandle,
     db: tauri::State<'_, AppDatabase>,
     proxy: tauri::State<'_, Arc<RemoteProxyState>>,
@@ -234,7 +242,9 @@ pub async fn open_remote_workspace(
     // Reserve the instance before connecting. A late request from a destroyed
     // window may not resurrect a tunnel; only an explicit new window can.
     let window_instance_id = new_remote_window_instance_id();
+    proxy.ssh.prompts.bind_app(&app);
     proxy.ssh.register_window(id, &window_instance_id);
+    proxy.ssh.set_prompt_window(id, window.label());
     let ready = async {
         let resolved = proxy.ssh.resolve_connection(&db.conn, id).await?;
         if !resolved.is_ssh() {
@@ -273,6 +283,7 @@ pub async fn open_remote_workspace(
             ));
         }
     };
+    proxy.ssh.set_prompt_window(id, window.label());
     if let Some(proxy) =
         app.try_state::<std::sync::Arc<crate::commands::remote_proxy::RemoteProxyState>>()
     {
@@ -282,4 +293,24 @@ pub async fn open_remote_workspace(
     }
     crate::commands::windows::post_window_setup(&window);
     Ok(())
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[tauri::command]
+pub fn list_ssh_auth_prompts(
+    window: tauri::WebviewWindow,
+    proxy: tauri::State<'_, Arc<RemoteProxyState>>,
+) -> Vec<crate::ssh::askpass::PromptPayload> {
+    proxy.ssh.prompts.list(window.label())
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[tauri::command]
+pub fn answer_ssh_auth_prompt(
+    window: tauri::WebviewWindow,
+    proxy: tauri::State<'_, Arc<RemoteProxyState>>,
+    request_id: String,
+    answer: Option<String>,
+) -> Result<(), AppCommandError> {
+    proxy.ssh.prompts.answer(window.label(), &request_id, answer)
 }

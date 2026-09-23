@@ -4679,8 +4679,8 @@
     "sshPort": "Port (optional)",
     "sshIdentityFile": "Identity file path (optional)",
     "sshConfigDefault": "Use SSH config",
-    "sshHelp": "Codeg installs the matching Linux server release over SSH and runs it in the background. Set up key/agent authentication and verify the host key in a terminal first. Testing or saving may install the server.",
-    "sshOptionalHint": "Blank optional fields inherit your SSH config. No password prompts or pasted access tokens. Closing this app only closes local tunnels; remote agents keep running.",
+    "sshHelp": "Codeg installs the matching Linux server over SSH. Use a key/ssh-agent or enter your password when prompted. Confirm new host fingerprints in the app. Testing or saving may install the server.",
+    "sshOptionalHint": "Secrets remain in memory only for this connection, are cleared when it closes, and are never saved in your profile.",
     "sshConnecting": "Preparing SSH connection… First-time installation may take several minutes.",
     "testConnection": "Test connection",
     "testSucceeded": "Connection test succeeded.",
@@ -4692,7 +4692,21 @@
     "sshUsernameInvalid": "Enter a valid SSH username, without shell options or spaces.",
     "sshPortInvalid": "Enter a whole-number port from 1 to 65535, or leave it blank.",
     "sshIdentityInvalid": "Enter a key file path without control characters or a leading dash.",
-    "sshConnectionExpired": "SSH connection \"{name}\" is unavailable. Check its profile and reopen the workspace."
+    "sshConnectionExpired": "SSH connection \"{name}\" is unavailable. Check its profile and reopen the workspace.",
+    "auth": {
+      "passwordTitle": "SSH password",
+      "passphraseTitle": "SSH key passphrase",
+      "hostKeyTitle": "Verify SSH host fingerprint",
+      "target": "Connecting to {host}.",
+      "verifyHost": "Verify this fingerprint through a trusted channel. Changed host keys are never accepted automatically.",
+      "sessionOnly": "Secrets remain in memory only for this connection, are cleared when it closes, and are never saved in your profile.",
+      "passwordLabel": "Password",
+      "passphraseLabel": "Key passphrase",
+      "connect": "Connect",
+      "trust": "Trust host and connect",
+      "cancel": "Cancel",
+      "failed": "Unable to send your answer. Please try again."
+    }
   },
   "BackupSettings": {
     "tabs": {

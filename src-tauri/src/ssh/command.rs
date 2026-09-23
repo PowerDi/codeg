@@ -19,33 +19,19 @@ const SERVER_ALIVE_COUNT_MAX: u32 = 3;
 /// instead of hanging a command worker.
 const CONNECT_TIMEOUT_SECS: u32 = 20;
 
-/// The non-negotiable options on every `ssh` codeg spawns.
-///
-/// `BatchMode=yes` is what makes this safe to run from a GUI: `ssh` will never
-/// prompt. No password prompt, no passphrase prompt, no "are you sure you want
-/// to continue connecting" — it fails with a message instead, and we turn that
-/// into an instruction to go finish the setup in a terminal. A GUI that cannot
-/// answer a prompt must not be given one, or it hangs forever holding a lock.
-///
-/// `StrictHostKeyChecking=yes` is the other half. The tempting value here is
-/// `accept-new`, which would make first connections "just work" — and would
-/// also make codeg trust whatever key answers the first time, which is the one
-/// moment a MITM has to be wrong. We require the host to already be in
-/// `known_hosts`, and tell the user to run `ssh <host>` once themselves so they
-/// see and accept the fingerprint with their own eyes.
-///
-/// Note these are passed as separate `-o` `KEY=VALUE` argv pairs rather than
-/// `-oKEY=VALUE`; both are accepted by OpenSSH, and the split form keeps each
-/// value in its own entry where it cannot be misread.
-fn base_options() -> Vec<(&'static str, String)> {
+/// GUI authentication is enabled only with our owned askpass broker. Headless
+/// tests retain strict, noninteractive key authentication. Neither mode ever
+/// auto-accepts host keys, reads passwords from stdin, or joins a shared master.
+fn base_options(interactive: bool) -> Vec<(&'static str, String)> {
     vec![
-        ("BatchMode", "yes".to_string()),
-        ("StrictHostKeyChecking", "yes".to_string()),
-        // Belt and braces with BatchMode: even if a future OpenSSH decided
-        // BatchMode permitted some interaction, there is no askpass to reach.
-        ("PasswordAuthentication", "no".to_string()),
+        ("BatchMode", if interactive { "no" } else { "yes" }.to_string()),
+        ("StrictHostKeyChecking", if interactive { "ask" } else { "yes" }.to_string()),
+        ("FingerprintHash", "sha256".to_string()),
+        // Passwords/passphrases go only through our helper. Arbitrary remote
+        // keyboard-interactive challenges cannot impersonate a cached prompt.
+        ("PasswordAuthentication", if interactive { "yes" } else { "no" }.to_string()),
         ("KbdInteractiveAuthentication", "no".to_string()),
-        ("NumberOfPasswordPrompts", "0".to_string()),
+        ("NumberOfPasswordPrompts", if interactive { "1" } else { "0" }.to_string()),
         // `ssh` must not read a terminal even if one is somehow attached.
         ("RequestTTY", "no".to_string()),
         ("SessionType", "default".to_string()),
@@ -114,9 +100,18 @@ pub fn build_ssh_args(
     invocation: SshInvocation,
     remote_command: Option<&str>,
 ) -> Vec<OsString> {
+    build_ssh_args_with_interaction(config, invocation, remote_command, false)
+}
+
+fn build_ssh_args_with_interaction(
+    config: &RemoteWorkspaceSshConfig,
+    invocation: SshInvocation,
+    remote_command: Option<&str>,
+    interactive: bool,
+) -> Vec<OsString> {
     let mut args: Vec<OsString> = Vec::new();
 
-    for (key, value) in base_options() {
+    for (key, value) in base_options(interactive) {
         args.push(OsString::from("-o"));
         args.push(OsString::from(format!("{key}={value}")));
     }
@@ -204,29 +199,37 @@ pub fn ssh_command(
     invocation: SshInvocation,
     remote_command: Option<&str>,
 ) -> tokio::process::Command {
+    ssh_command_with_askpass(config, invocation, remote_command, None)
+}
+
+pub fn ssh_command_with_askpass(
+    config: &RemoteWorkspaceSshConfig,
+    invocation: SshInvocation,
+    remote_command: Option<&str>,
+    askpass: Option<&crate::ssh::askpass::AskpassServer>,
+) -> tokio::process::Command {
     let mut command = crate::process::tokio_command("ssh");
-    command.args(build_ssh_args(config, invocation, remote_command));
-    // `ssh` reads `~/.ssh/config` and talks to `ssh-agent` through the
-    // environment it inherits, which is exactly what we want: the user's own
-    // configuration stays authoritative. `SSH_ASKPASS` is the one thing worth
-    // suppressing — with `SSH_ASKPASS_REQUIRE=never`, a GUI askpass helper can
-    // never pop up behind the app where nobody would see it, and BatchMode's
-    // clean failure is what the user gets instead.
+    command.args(build_ssh_args_with_interaction(config, invocation, remote_command, askpass.is_some()));
     command.env("SSH_ASKPASS_REQUIRE", "never");
+    if let Some(askpass) = askpass { askpass.apply(&mut command); }
     command
 }
 
 /// Turn a failed `ssh` run into an error that tells the user what to *do*.
 ///
-/// `BatchMode=yes` + `StrictHostKeyChecking=yes` mean the two most common first-
-/// run failures are both "go do something in a terminal once", and neither is
-/// self-evident from ssh's own wording. Anything unrecognised is passed through
+/// Distinguish host trust, rejected credentials and transport failures. Both
+/// GUI askpass and batch-mode tests use this mapping. Anything unrecognised is passed through
 /// redacted rather than reworded, because a wrong guess is worse than the raw
 /// message.
 pub fn classify_ssh_failure(stderr: &str, exit_code: Option<i32>) -> AppCommandError {
     let lower = stderr.to_ascii_lowercase();
     let detail =
         crate::ssh::redact::truncate_for_detail(&crate::ssh::redact::redact_secrets(stderr.trim()));
+
+    if lower.contains("remote host identification has changed") {
+        return AppCommandError::authentication_failed("The SSH host key has changed; connection refused")
+            .with_detail(format!("Verify the new fingerprint through a trusted channel before updating known_hosts. Codeg will not bypass a changed host key.\n\n{detail}"));
+    }
 
     // Host key problems first: `StrictHostKeyChecking=yes` refuses an unknown
     // host, and codeg deliberately does not accept it on the user's behalf.
@@ -236,11 +239,11 @@ pub fn classify_ssh_failure(stderr: &str, exit_code: Option<i32>) -> AppCommandE
         || lower.contains("known_hosts")
     {
         return AppCommandError::authentication_failed(
-            "The remote host is not in your known_hosts yet, so codeg refused to connect.",
+            "The SSH host key could not be verified, so codeg refused to connect.",
         )
         .with_detail(format!(
-            "Run `ssh <host>` once in a terminal, check the fingerprint, and accept it. \
-             codeg never accepts an unverified host key for you.\n\n{detail}"
+            "Confirm the fingerprint in Codeg (or with `ssh <host>` in a terminal). \
+             Codeg never accepts an unverified or changed host key for you.\n\n{detail}"
         ));
     }
 
@@ -249,12 +252,11 @@ pub fn classify_ssh_failure(stderr: &str, exit_code: Option<i32>) -> AppCommandE
         || lower.contains("too many authentication failures")
         || lower.contains("publickey")
     {
-        return AppCommandError::authentication_failed("The remote host refused the SSH key.")
+        return AppCommandError::authentication_failed("The remote host refused SSH authentication.")
             .with_detail(format!(
-                "codeg only uses non-interactive key authentication (no passwords, no MFA). \
-             Make sure the key is loaded in ssh-agent (or set an identity file), that \
-             `ssh <host>` works in a terminal without prompting, and that the key is in \
-             the remote account's authorized_keys.\n\n{detail}"
+                "Check the username and password, or use an authorized key / ssh-agent. \
+             The server must allow password or public-key authentication. \
+             Keyboard-interactive MFA is not supported.\n\n{detail}"
             ));
     }
 
@@ -270,11 +272,11 @@ pub fn classify_ssh_failure(stderr: &str, exit_code: Option<i32>) -> AppCommandE
 
     if lower.contains("passphrase") || lower.contains("password") {
         return AppCommandError::authentication_failed(
-            "The SSH key needs a passphrase, which codeg cannot prompt for.",
+            "SSH authentication needs a password or key passphrase.",
         )
         .with_detail(format!(
-            "Load the key into ssh-agent first (`ssh-add <key>`), then reconnect. \
-             Interactive password and MFA logins are not supported.\n\n{detail}"
+            "Reconnect and answer the authentication dialog, or load the key into ssh-agent. \
+             Keyboard-interactive MFA is not supported.\n\n{detail}"
         ));
     }
 
@@ -304,6 +306,18 @@ mod tests {
 
     /// If either of these ever stops being passed, codeg starts either hanging
     /// on an unanswerable prompt or trusting unverified host keys.
+    #[test]
+    fn gui_authentication_keeps_host_verification_and_owned_processes() {
+        let config = RemoteWorkspaceSshConfig { host: "server".into(), ..Default::default() };
+        let args: Vec<String> = build_ssh_args_with_interaction(&config, SshInvocation::Exec, Some("true"), true)
+            .iter().map(|value| value.to_string_lossy().into_owned()).collect();
+        for expected in ["BatchMode=no", "StrictHostKeyChecking=ask", "FingerprintHash=sha256", "PasswordAuthentication=yes", "NumberOfPasswordPrompts=1", "KbdInteractiveAuthentication=no", "ControlMaster=no", "ControlPath=none"] {
+            assert_eq!(args.iter().filter(|value| value.as_str() == expected).count(), 1);
+        }
+        assert!(!args.contains(&"BatchMode=yes".into()));
+        assert!(!args.contains(&"StrictHostKeyChecking=no".into()));
+    }
+
     #[test]
     fn every_invocation_sets_batchmode_and_strict_host_key_checking() {
         for invocation in [
