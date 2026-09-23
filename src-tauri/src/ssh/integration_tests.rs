@@ -1,26 +1,18 @@
 //! Runs only against the disposable SSH server created by the CI harness.
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use futures_util::{SinkExt, StreamExt};
 use std::time::Duration;
-use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, Message};
+use tokio_tungstenite::tungstenite::{http::HeaderMap, Message};
 
 use super::{bootstrap::run_bootstrap, tunnel::SshManager};
+use crate::commands::remote_proxy::{connect_with_subprotocol_auth, http_url_to_ws_url};
 use crate::db::service::remote_workspace_connection_service as profiles;
 use crate::models::RemoteWorkspaceSshConfig;
 
 async fn websocket_ready(base_url: &str, token: &str) {
-    let url = format!("{}/ws", base_url.replacen("http://", "ws://", 1));
-    let mut request = url.into_client_request().unwrap();
-    let mut auth = HeaderValue::from_str(&format!(
-        "codeg-events, codeg-token.{}",
-        URL_SAFE_NO_PAD.encode(token)
-    ))
-    .unwrap();
-    auth.set_sensitive(true);
-    request.headers_mut().insert("sec-websocket-protocol", auth);
-    let (mut socket, _) = tokio::time::timeout(
+    let url = http_url_to_ws_url(base_url);
+    let mut socket = tokio::time::timeout(
         Duration::from_secs(10),
-        tokio_tungstenite::connect_async(request),
+        connect_with_subprotocol_auth(&url, token, &HeaderMap::new()),
     )
     .await
     .unwrap()

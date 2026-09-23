@@ -877,12 +877,6 @@ pub async fn remote_upload_workspace_paths(
         ));
     }
 
-    let conn = proxy
-        .ssh
-        .resolve_connection(&db.conn, connection_id)
-        .await?;
-
-    let custom_headers = conn.headers.to_header_map();
     let (transfer_id, cancel_token) = transfers.register_transfer().await;
     let result = async {
         let _permit = transfers
@@ -943,10 +937,9 @@ pub async fn remote_upload_workspace_paths(
                     let relative_path = join_upload_relative(&base_prefix, nested);
                     let file_result = upload_one_workspace_path(
                         &app,
-                        proxy.http_client(conn.is_ssh(), true),
-                        &conn.base_url,
-                        conn.token.trim(),
-                        &custom_headers,
+                        &proxy,
+                        &db.conn,
+                        connection_id,
                         &transfer_id,
                         cancel_token.clone(),
                         &root_path,
@@ -961,10 +954,9 @@ pub async fn remote_upload_workspace_paths(
             } else if metadata.is_file() {
                 let file_result = upload_one_workspace_path(
                     &app,
-                    proxy.http_client(conn.is_ssh(), true),
-                    &conn.base_url,
-                    conn.token.trim(),
-                    &custom_headers,
+                    &proxy,
+                    &db.conn,
+                    connection_id,
                     &transfer_id,
                     cancel_token.clone(),
                     &root_path,
@@ -1026,13 +1018,25 @@ pub async fn remote_upload_workspace_paths(
     result
 }
 
+async fn resolve_transfer_connection(
+    proxy: &RemoteProxyState,
+    db: &sea_orm::DatabaseConnection,
+    connection_id: i32,
+    cancel: &CancellationToken,
+) -> Result<crate::models::RemoteWorkspaceConnectionInfo, AppCommandError> {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(workspace_transfer_cancelled()),
+        result = proxy.ssh.resolve_connection(db, connection_id) => result,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn upload_one_workspace_path(
     app: &AppHandle,
-    http: &reqwest::Client,
-    base_url: &str,
-    token: &str,
-    custom_headers: &HeaderMap,
+    proxy: &RemoteProxyState,
+    db: &sea_orm::DatabaseConnection,
+    connection_id: i32,
     transfer_id: &str,
     cancel_token: CancellationToken,
     root_path: &str,
@@ -1090,14 +1094,18 @@ async fn upload_one_workspace_path(
     }
     form = form.part("file", part);
 
+    // A directory upload can outlive several tunnel generations. Resolve for
+    // each file, after the transfer queue, without replaying a failed upload.
+    let conn = resolve_transfer_connection(proxy, db, connection_id, &cancel_token).await?;
     let url = format!(
         "{}/api/upload_workspace_file",
-        base_url.trim_end_matches('/'),
+        conn.base_url.trim_end_matches('/'),
     );
-    let response = http
+    let response = proxy
+        .http_client(conn.is_ssh(), true)
         .post(&url)
-        .bearer_auth(token)
-        .headers(custom_headers.clone())
+        .bearer_auth(conn.token.trim())
+        .headers(conn.headers.to_header_map())
         .multipart(form)
         .send()
         .await
@@ -1289,12 +1297,6 @@ async fn remote_workspace_download_stream(
     path: String,
     save_path: String,
 ) -> Result<RemoteWorkspaceDownloadResult, AppCommandError> {
-    let conn = proxy
-        .ssh
-        .resolve_connection(&db.conn, connection_id)
-        .await?;
-
-    let custom_headers = conn.headers.to_header_map();
     let (transfer_id, cancel_token) = transfers.register_transfer().await;
     let result = async {
         let _permit = transfers
@@ -1306,6 +1308,11 @@ async fn remote_workspace_download_stream(
                     "Remote workspace download semaphore is closed",
                 )
             })?;
+
+        // Resolve only after the semaphore: a queued transfer may have waited
+        // while the WebSocket path rebuilt the SSH tunnel on a different port.
+        let conn = resolve_transfer_connection(&proxy, &db.conn, connection_id, &cancel_token).await?;
+        let custom_headers = conn.headers.to_header_map();
 
         let ticket_url = format!(
             "{}/api/workspace_download_ticket",
@@ -2039,7 +2046,7 @@ async fn snapshot_subscribers(entry: &Arc<WsTaskEntry>) -> Vec<String> {
 /// WebSocket clients use because browsers cannot set arbitrary headers
 /// on WS handshakes; we follow the same convention here so both transports
 /// share one server-side codepath.
-async fn connect_with_subprotocol_auth(
+pub(crate) async fn connect_with_subprotocol_auth(
     ws_url: &str,
     token: &str,
     custom_headers: &HeaderMap,
@@ -2053,23 +2060,26 @@ async fn connect_with_subprotocol_auth(
 
     let encoded_token = URL_SAFE_NO_PAD.encode(token.trim().as_bytes());
     let protocols_value = format!("{WS_EVENT_PROTOCOL}, {WS_TOKEN_PROTOCOL_PREFIX}{encoded_token}");
-    request.headers_mut().insert(
-        "sec-websocket-protocol",
-        HeaderValue::from_str(&protocols_value)
-            .map_err(|e| format!("invalid subprotocol value: {e}"))?,
-    );
+    let mut protocols = HeaderValue::from_str(&protocols_value)
+        .map_err(|e| format!("invalid subprotocol value: {e}"))?;
+    protocols.set_sensitive(true);
+    request.headers_mut().insert("sec-websocket-protocol", protocols);
     request.headers_mut().extend(custom_headers.clone());
 
-    let (stream, _resp) = tokio_tungstenite::connect_async(request)
-        .await
-        .map_err(|e| format!("connect_async: {e}"))?;
+    let (stream, _resp) = tokio::time::timeout(
+        HTTP_TIMEOUT,
+        tokio_tungstenite::connect_async(request),
+    )
+    .await
+    .map_err(|_| "Remote WebSocket handshake timed out".to_string())?
+    .map_err(|e| format!("connect_async: {e}"))?;
     Ok(stream)
 }
 
 /// Convert an `http://…` or `https://…` base URL into the corresponding
 /// WebSocket URL ending in `/ws/events`. Anything else is passed through
 /// untouched so tungstenite can surface a clean parse error.
-fn http_url_to_ws_url(base_url: &str) -> String {
+pub(crate) fn http_url_to_ws_url(base_url: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
     if let Some(rest) = trimmed.strip_prefix("https://") {
         format!("wss://{rest}/ws/events")
@@ -2108,6 +2118,27 @@ mod tests {
     // Both of these guard the same thing from two directions: the custom
     // headers on a remote connection are credentials, and neither the remote
     // nor a redirect it issues gets to choose which host receives them.
+
+    #[tokio::test]
+    async fn transfer_resolution_reads_current_profile_and_respects_cancellation() {
+        let db = crate::db::test_helpers::fresh_in_memory_db().await;
+        let proxy = RemoteProxyState::new();
+        let profile = remote_workspace_connection_service::create(
+            &db.conn, "transfer", "http://localhost:1234", "old", &[], None,
+        ).await.unwrap();
+        let cancel = CancellationToken::new();
+        let first = resolve_transfer_connection(&proxy, &db.conn, profile.id, &cancel).await.unwrap();
+        assert_eq!(first.base_url, "http://localhost:1234");
+        remote_workspace_connection_service::update(
+            &db.conn, profile.id, "transfer", "http://localhost:1235", "new", &[], None,
+        ).await.unwrap();
+        let next = resolve_transfer_connection(&proxy, &db.conn, profile.id, &cancel).await.unwrap();
+        assert_eq!(next.base_url, "http://localhost:1235");
+        assert_eq!(next.token, "new");
+        cancel.cancel();
+        let err = resolve_transfer_connection(&proxy, &db.conn, -1, &cancel).await.unwrap_err();
+        assert!(err.message.to_ascii_lowercase().contains("cancel"));
+    }
 
     #[test]
     fn ticket_url_resolves_a_path_against_the_connection() {

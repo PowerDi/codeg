@@ -1,0 +1,3 @@
+# These payloads execute on Linux even when the desktop is built on Windows.
+src-tauri/src/ssh/bootstrap.sh text eol=lf
+scripts/ssh-workspace-ci.sh text eol=lf

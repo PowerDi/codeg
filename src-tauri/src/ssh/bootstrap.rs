@@ -222,7 +222,13 @@ fn requested_version() -> &'static str {
 
 /// Full remote payload: prelude, then the script.
 pub fn bootstrap_payload(version: &str) -> String {
-    format!("{}{}", script_prelude(version), BOOTSTRAP_SCRIPT)
+    payload_with_script(version, BOOTSTRAP_SCRIPT)
+}
+
+fn payload_with_script(version: &str, script: &str) -> String {
+    // A Windows source checkout may use CRLF. The payload is executed by a
+    // Linux shell, where a carriage return becomes part of the command/argv.
+    format!("{}{}", script_prelude(version), script.replace("\r\n", "\n"))
 }
 
 /// Run the bootstrap on `locator`'s host.
@@ -365,6 +371,15 @@ impl std::fmt::Debug for BootstrapOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_checkout_line_endings_never_reach_the_remote_shell() {
+        assert_eq!(
+            payload_with_script("0.31.2", "set -u\r\necho ok\r\n"),
+            payload_with_script("0.31.2", "set -u\necho ok\n"),
+        );
+        assert!(!bootstrap_payload("0.31.2").contains('\r'));
+    }
 
     #[cfg(unix)]
     #[tokio::test]
