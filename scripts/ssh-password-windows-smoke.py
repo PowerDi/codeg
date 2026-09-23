@@ -52,7 +52,7 @@ def main():
             return "password"
 
         def check_auth_password(self, username, supplied):
-            valid = username == "codeg-smoke" and hmac.compare_digest(supplied, password)
+            valid = username == "codeg-smoke" and hmac.compare_digest(supplied.encode("utf-8"), password.encode("utf-8"))
             return paramiko.AUTH_SUCCESSFUL if valid else paramiko.AUTH_FAILED
 
         def check_channel_request(self, kind, chanid):
