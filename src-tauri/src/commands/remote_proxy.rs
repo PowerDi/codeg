@@ -133,6 +133,7 @@ struct WsTaskEntry {
     /// attach frames on every `__ready__` so a transient WS gap is recovered
     /// automatically.
     outbound_tx: mpsc::Sender<String>,
+    reconnect: tokio::sync::Notify,
 }
 
 #[derive(Clone)]
@@ -226,6 +227,9 @@ pub struct RemoteProxyState {
     destroyed_window_instances: Mutex<HashSet<String>>,
     http: reqwest::Client,
     workspace_http: reqwest::Client,
+    ssh_http: reqwest::Client,
+    ssh_workspace_http: reqwest::Client,
+    pub(crate) ssh: crate::ssh::tunnel::SshManager,
 }
 
 impl RemoteProxyState {
@@ -233,6 +237,18 @@ impl RemoteProxyState {
         Self {
             tasks: Mutex::new(HashMap::new()),
             destroyed_window_instances: Mutex::new(HashSet::new()),
+            ssh: crate::ssh::tunnel::SshManager::new(),
+            ssh_http: reqwest::Client::builder()
+                .no_proxy()
+                .timeout(HTTP_TIMEOUT)
+                .redirect(connection_redirect_policy())
+                .build()
+                .expect("failed to build SSH HTTP client"),
+            ssh_workspace_http: reqwest::Client::builder()
+                .no_proxy()
+                .redirect(connection_redirect_policy())
+                .build()
+                .expect("failed to build SSH transfer client"),
             http: reqwest::Client::builder()
                 .timeout(HTTP_TIMEOUT)
                 .redirect(connection_redirect_policy())
@@ -250,6 +266,36 @@ impl RemoteProxyState {
     /// issue `remote_ws_subscribe`, so even a window destroyed while the
     /// subscribe invoke is still queued gets a tombstone before any late
     /// subscription insert can land.
+    fn http_client(&self, ssh: bool, transfer: bool) -> &reqwest::Client {
+        match (ssh, transfer) {
+            (true, true) => &self.ssh_workspace_http,
+            (true, false) => &self.ssh_http,
+            (false, true) => &self.workspace_http,
+            (false, false) => &self.http,
+        }
+    }
+
+    pub(crate) async fn invalidate_connection(&self, id: i32) {
+        self.ssh.shutdown(id).await;
+        if let Some(entry) = self.tasks.lock().await.get(&id) {
+            entry.reconnect.notify_one();
+        }
+    }
+
+    pub(crate) async fn close_connection(&self, id: i32) {
+        if let Some(entry) = self.tasks.lock().await.remove(&id) {
+            let _ = entry.shutdown_tx.send(true);
+        }
+        self.ssh.shutdown(id).await;
+    }
+
+    pub(crate) async fn shutdown_all(&self) {
+        for entry in self.tasks.lock().await.drain().map(|(_, entry)| entry) {
+            let _ = entry.shutdown_tx.send(true);
+        }
+        self.ssh.shutdown_all().await;
+    }
+
     pub fn register_window_instance_cleanup(
         self: &Arc<Self>,
         window: &WebviewWindow,
@@ -257,9 +303,20 @@ impl RemoteProxyState {
     ) {
         let proxy = self.clone();
         let label = window.label().to_string();
+        let connection_id = window.url().ok().and_then(|url| {
+            url.query_pairs().find_map(|(key, value)| {
+                (key == "remoteConnectionId").then(|| value.parse::<i32>().ok()).flatten()
+            })
+        });
+        if let Some(id) = connection_id {
+            self.ssh.register_window(id, &window_instance_id);
+        }
         window.on_window_event(move |event| {
             if !matches!(event, tauri::WindowEvent::Destroyed) {
                 return;
+            }
+            if let Some(id) = connection_id {
+                proxy.ssh.window_closed(id, &window_instance_id);
             }
             let proxy = proxy.clone();
             let label = label.clone();
@@ -374,12 +431,7 @@ pub async fn remote_http_call(
     args: Option<Value>,
     timeout_ms: Option<u64>,
 ) -> Result<Value, AppCommandError> {
-    let conn = remote_workspace_connection_service::get(&db.conn, connection_id)
-        .await
-        .map_err(AppCommandError::db)?
-        .ok_or_else(|| {
-            AppCommandError::not_found(format!("Remote connection {connection_id} not found"))
-        })?;
+    let conn = proxy.ssh.resolve_connection(&db.conn, connection_id).await?;
 
     let url = format!(
         "{}/api/{}",
@@ -390,7 +442,7 @@ pub async fn remote_http_call(
     let body = args.unwrap_or(Value::Object(serde_json::Map::new()));
 
     let mut request = proxy
-        .http
+        .http_client(conn.is_ssh(), false)
         .post(&url)
         .bearer_auth(conn.token.trim())
         .headers(conn.headers.to_header_map())
@@ -592,12 +644,7 @@ pub async fn remote_upload_attachment(
     session_id: Option<String>,
     data_base64: String,
 ) -> Result<Value, AppCommandError> {
-    let conn = remote_workspace_connection_service::get(&db.conn, connection_id)
-        .await
-        .map_err(AppCommandError::db)?
-        .ok_or_else(|| {
-            AppCommandError::not_found(format!("Remote connection {connection_id} not found"))
-        })?;
+    let conn = proxy.ssh.resolve_connection(&db.conn, connection_id).await?;
 
     // Reject oversized payloads BEFORE allocating. The remote server
     // enforces the same cap on the decoded bytes, but a malicious /
@@ -676,7 +723,7 @@ pub async fn remote_upload_attachment(
         conn.base_url.trim_end_matches('/'),
     );
     let response = proxy
-        .http
+        .http_client(conn.is_ssh(), false)
         .post(&url)
         .bearer_auth(conn.token.trim())
         .headers(conn.headers.to_header_map())
@@ -822,12 +869,7 @@ pub async fn remote_upload_workspace_paths(
         ));
     }
 
-    let conn = remote_workspace_connection_service::get(&db.conn, connection_id)
-        .await
-        .map_err(AppCommandError::db)?
-        .ok_or_else(|| {
-            AppCommandError::not_found(format!("Remote connection {connection_id} not found"))
-        })?;
+    let conn = proxy.ssh.resolve_connection(&db.conn, connection_id).await?;
 
     let custom_headers = conn.headers.to_header_map();
     let (transfer_id, cancel_token) = transfers.register_transfer().await;
@@ -890,7 +932,7 @@ pub async fn remote_upload_workspace_paths(
                     let relative_path = join_upload_relative(&base_prefix, nested);
                     let file_result = upload_one_workspace_path(
                         &app,
-                        &proxy,
+                        proxy.http_client(conn.is_ssh(), true),
                         &conn.base_url,
                         conn.token.trim(),
                         &custom_headers,
@@ -908,7 +950,7 @@ pub async fn remote_upload_workspace_paths(
             } else if metadata.is_file() {
                 let file_result = upload_one_workspace_path(
                     &app,
-                    &proxy,
+                    proxy.http_client(conn.is_ssh(), true),
                     &conn.base_url,
                     conn.token.trim(),
                     &custom_headers,
@@ -976,7 +1018,7 @@ pub async fn remote_upload_workspace_paths(
 #[allow(clippy::too_many_arguments)]
 async fn upload_one_workspace_path(
     app: &AppHandle,
-    proxy: &RemoteProxyState,
+    http: &reqwest::Client,
     base_url: &str,
     token: &str,
     custom_headers: &HeaderMap,
@@ -1041,8 +1083,7 @@ async fn upload_one_workspace_path(
         "{}/api/upload_workspace_file",
         base_url.trim_end_matches('/'),
     );
-    let response = proxy
-        .workspace_http
+    let response = http
         .post(&url)
         .bearer_auth(token)
         .headers(custom_headers.clone())
@@ -1237,12 +1278,7 @@ async fn remote_workspace_download_stream(
     path: String,
     save_path: String,
 ) -> Result<RemoteWorkspaceDownloadResult, AppCommandError> {
-    let conn = remote_workspace_connection_service::get(&db.conn, connection_id)
-        .await
-        .map_err(AppCommandError::db)?
-        .ok_or_else(|| {
-            AppCommandError::not_found(format!("Remote connection {connection_id} not found"))
-        })?;
+    let conn = proxy.ssh.resolve_connection(&db.conn, connection_id).await?;
 
     let custom_headers = conn.headers.to_header_map();
     let (transfer_id, cancel_token) = transfers.register_transfer().await;
@@ -1262,7 +1298,7 @@ async fn remote_workspace_download_stream(
             conn.base_url.trim_end_matches('/')
         );
         let ticket_response = proxy
-            .workspace_http
+            .http_client(conn.is_ssh(), true)
             .post(ticket_url)
             .bearer_auth(conn.token.trim())
             .headers(custom_headers.clone())
@@ -1295,7 +1331,7 @@ async fn remote_workspace_download_stream(
             })?;
         let download_url = absolute_remote_ticket_url(&conn.base_url, &ticket.url)?;
         let response = proxy
-            .workspace_http
+            .http_client(conn.is_ssh(), true)
             .get(download_url)
             .headers(custom_headers.clone())
             .send()
@@ -1587,8 +1623,7 @@ pub async fn remote_ws_subscribe(
 
     // Slow path: load credentials, create entry, spawn WS task.
     let conn = remote_workspace_connection_service::get(&db.conn, connection_id)
-        .await
-        .map_err(AppCommandError::db)?
+        .await?
         .ok_or_else(|| {
             AppCommandError::not_found(format!("Remote connection {connection_id} not found"))
         })?;
@@ -1604,6 +1639,7 @@ pub async fn remote_ws_subscribe(
         ready: RwLock::new(false),
         shutdown_tx,
         outbound_tx,
+        reconnect: tokio::sync::Notify::new(),
     });
 
     // Insert under the proxy lock. If a concurrent subscribe raced us, fold
@@ -1627,9 +1663,8 @@ pub async fn remote_ws_subscribe(
 
     let task_app = app.clone();
     let task_proxy = proxy_arc.clone();
-    let base_url = conn.base_url.clone();
-    let token = conn.token.clone();
-    let custom_headers = conn.headers.to_header_map();
+    let database = db.conn.clone();
+    let ssh_mode = conn.is_ssh();
     let task_entry = entry.clone();
 
     tauri::async_runtime::spawn(async move {
@@ -1637,9 +1672,8 @@ pub async fn remote_ws_subscribe(
             task_app,
             task_proxy,
             connection_id,
-            base_url,
-            token,
-            custom_headers,
+            database,
+            ssh_mode,
             task_entry,
             shutdown_rx,
             outbound_rx,
@@ -1751,15 +1785,13 @@ async fn run_ws_task(
     app: AppHandle,
     proxy: Arc<RemoteProxyState>,
     connection_id: i32,
-    base_url: String,
-    token: String,
-    custom_headers: HeaderMap,
+    database: sea_orm::DatabaseConnection,
+    mut ssh_mode: bool,
     entry: Arc<WsTaskEntry>,
     mut shutdown_rx: watch::Receiver<bool>,
     mut outbound_rx: mpsc::Receiver<String>,
 ) {
     let event_name = format!("remote-ws-event-{connection_id}");
-    let ws_url = http_url_to_ws_url(&base_url);
     let mut fail_count: u32 = 0;
 
     'reconnect: loop {
@@ -1775,15 +1807,30 @@ async fn run_ws_task(
                 }
                 continue;
             }
-            res = connect_with_subprotocol_auth(&ws_url, &token, &custom_headers) => res,
+            _ = entry.reconnect.notified() => continue,
+            res = async {
+                let conn = proxy.ssh.resolve_connection(&database, connection_id).await?;
+                ssh_mode = conn.is_ssh();
+                connect_with_subprotocol_auth(&http_url_to_ws_url(&conn.base_url), &conn.token, &conn.headers.to_header_map())
+                    .await.map_err(|err| AppCommandError::network("Remote WebSocket connection failed")
+                        .with_detail(crate::ssh::redact::redact_secrets(&err.to_string())))
+            } => res,
         };
 
         let mut socket = match connect_result {
             Ok(s) => s,
             Err(err) => {
                 tracing::error!("[RemoteProxy] WS connect failed for connection {connection_id}: {err}");
-                fail_count += 1;
-                if fail_count >= WS_RECONNECT_FAIL_THRESHOLD {
+                if matches!(err.code, AppErrorCode::NotFound) {
+                    emit_internal(&app, &entry, &event_name, WS_UNAUTHORIZED_CHANNEL).await;
+                    break;
+                }
+                fail_count = fail_count.saturating_add(1);
+                if ssh_mode {
+                    proxy.ssh.shutdown(connection_id).await;
+                    emit_internal(&app, &entry, &event_name, WS_DISCONNECTED_CHANNEL).await;
+                }
+                if !ssh_mode && fail_count >= WS_RECONNECT_FAIL_THRESHOLD {
                     emit_internal(&app, &entry, &event_name, WS_UNAUTHORIZED_CHANNEL).await;
                     break;
                 }
@@ -1809,6 +1856,10 @@ async fn run_ws_task(
                         let _ = socket.send(Message::Close(None)).await;
                         break 'reconnect;
                     }
+                }
+                _ = entry.reconnect.notified() => {
+                    let _ = socket.send(Message::Close(None)).await;
+                    break;
                 }
                 outbound = outbound_rx.recv() => match outbound {
                     Some(text) => {
@@ -1857,8 +1908,11 @@ async fn run_ws_task(
         // Disconnected (not via shutdown). Notify and try again.
         *entry.ready.write().await = false;
         emit_internal(&app, &entry, &event_name, WS_DISCONNECTED_CHANNEL).await;
-        fail_count += 1;
-        if fail_count >= WS_RECONNECT_FAIL_THRESHOLD {
+        if ssh_mode {
+            proxy.ssh.shutdown(connection_id).await;
+        }
+        fail_count = fail_count.saturating_add(1);
+        if !ssh_mode && fail_count >= WS_RECONNECT_FAIL_THRESHOLD {
             emit_internal(&app, &entry, &event_name, WS_UNAUTHORIZED_CHANNEL).await;
             break;
         }
@@ -2032,6 +2086,7 @@ mod tests {
             ready: RwLock::new(false),
             shutdown_tx,
             outbound_tx,
+            reconnect: tokio::sync::Notify::new(),
         })
     }
 
@@ -2344,6 +2399,7 @@ mod tests {
             ready: RwLock::new(false),
             shutdown_tx,
             outbound_tx,
+            reconnect: tokio::sync::Notify::new(),
         });
         proxy.tasks.lock().await.insert(1, entry);
 
@@ -2378,6 +2434,7 @@ mod tests {
             ready: RwLock::new(false),
             shutdown_tx,
             outbound_tx,
+            reconnect: tokio::sync::Notify::new(),
         });
         (entry, outbound_rx)
     }

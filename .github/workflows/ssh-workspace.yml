@@ -1,0 +1,66 @@
+name: SSH Workspace Checks
+
+on:
+  push:
+    branches: [feat/ssh-remote-workspaces]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ssh-workspace-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  INSTA_UPDATE: "no"
+  RUST_BACKTRACE: short
+
+jobs:
+  frontend:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint .
+      - run: pnpm test
+      - run: pnpm build
+
+  rust:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+          shared-key: test-ubuntu-22.04-desktop
+      - name: Desktop dependencies and test assets
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev openssh-server
+          mkdir -p out
+          printf '<!doctype html><html><body></body></html>\n' > out/index.html
+      - name: Desktop tests (including SSH behavior)
+        working-directory: src-tauri
+        run: cargo test --features test-utils --lib
+      - name: Desktop clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets --features test-utils -- -D warnings
+      - name: Server tests
+        working-directory: src-tauri
+        run: cargo test --no-default-features --bin codeg-server --lib
+      - name: Server and companion clippy
+        working-directory: src-tauri
+        run: cargo clippy --no-default-features --bin codeg-server --bin codeg-mcp --lib -- -D warnings

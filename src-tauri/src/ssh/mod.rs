@@ -1,0 +1,12 @@
+//! SSH-managed remote workspaces. Validation also runs in the server build,
+//! since both runtimes share the database schema. Process/tunnel ownership is
+//! desktop-only; the remote server needs no SSH capability or protocol change.
+pub mod config;
+#[cfg(feature = "tauri-runtime")]
+pub mod bootstrap;
+#[cfg(feature = "tauri-runtime")]
+pub mod command;
+#[cfg(feature = "tauri-runtime")]
+pub mod redact;
+#[cfg(feature = "tauri-runtime")]
+pub mod tunnel;

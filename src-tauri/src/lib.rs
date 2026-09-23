@@ -44,6 +44,7 @@ pub mod pets;
 pub mod preferences;
 pub mod process;
 pub mod supervise;
+pub mod ssh;
 mod terminal;
 pub mod turn_timings;
 pub mod update;
@@ -2033,6 +2034,9 @@ mod tauri_app {
             .run(|app, event| match event {
                 tauri::RunEvent::ExitRequested { .. } => {
                     APP_QUITTING.store(true, Ordering::Relaxed);
+                    if let Some(proxy) = app.try_state::<Arc<crate::commands::remote_proxy::RemoteProxyState>>() {
+                        tauri::async_runtime::block_on(proxy.shutdown_all());
+                    }
                     // Drop the desktop pet alongside the workspace so it
                     // never outlives a real quit. Tauri also tears down all
                     // windows on shutdown, but doing it explicitly here lets
