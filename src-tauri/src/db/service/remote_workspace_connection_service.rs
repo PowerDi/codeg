@@ -550,9 +550,16 @@ mod tests {
         let db = fresh_in_memory_db().await;
         // Seeded through `create` so the legacy row can copy its timestamps
         // verbatim, rather than guessing SeaORM's SQLite datetime encoding.
-        let seed = create(&db.conn, "Seed", "http://127.0.0.1:3080", "token", &[], None)
-            .await
-            .unwrap();
+        let seed = create(
+            &db.conn,
+            "Seed",
+            "http://127.0.0.1:3080",
+            "token",
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
         db.conn
             .execute(Statement::from_string(
                 DbBackend::Sqlite,
@@ -574,9 +581,16 @@ mod tests {
 
         // `create` re-reads every column to find the max sort order, so the
         // legacy row has to survive that read too.
-        let next = create(&db.conn, "Next", "http://127.0.0.1:3081", "token", &[], None)
-            .await
-            .unwrap();
+        let next = create(
+            &db.conn,
+            "Next",
+            "http://127.0.0.1:3081",
+            "token",
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(next.sort_order, 2);
         assert_ne!(next.id, seed.id);
     }
@@ -627,7 +641,10 @@ mod tests {
 
         // And it survives a re-read.
         let fetched = get(&db.conn, created.id).await.unwrap().unwrap();
-        assert_eq!(fetched.ssh.as_ref().map(|s| s.host.clone()).as_deref(), Some("build-box"));
+        assert_eq!(
+            fetched.ssh.as_ref().map(|s| s.host.clone()).as_deref(),
+            Some("build-box")
+        );
     }
 
     /// An unset port must stay unset through a save/load cycle: writing 22 would
@@ -660,8 +677,14 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(matches!(err.code, crate::app_error::AppErrorCode::InvalidInput));
-        assert!(list(&db.conn).await.unwrap().is_empty(), "nothing was stored");
+        assert!(matches!(
+            err.code,
+            crate::app_error::AppErrorCode::InvalidInput
+        ));
+        assert!(
+            list(&db.conn).await.unwrap().is_empty(),
+            "nothing was stored"
+        );
     }
 
     /// Switching SSH → HTTP must replace the placeholder locator wholesale, and
@@ -723,9 +746,16 @@ mod tests {
         use sea_orm::{ConnectionTrait, DbBackend, Statement};
 
         let db = fresh_in_memory_db().await;
-        create(&db.conn, "Seed", "http://127.0.0.1:3080", "token", &[], None)
-            .await
-            .unwrap();
+        create(
+            &db.conn,
+            "Seed",
+            "http://127.0.0.1:3080",
+            "token",
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
         db.conn
             .execute(Statement::from_string(
                 DbBackend::Sqlite,
@@ -757,9 +787,16 @@ mod tests {
         use sea_orm::{ConnectionTrait, DbBackend, Statement};
 
         let db = fresh_in_memory_db().await;
-        let good = create(&db.conn, "Good", "http://127.0.0.1:3080", "token", &[], None)
-            .await
-            .unwrap();
+        let good = create(
+            &db.conn,
+            "Good",
+            "http://127.0.0.1:3080",
+            "token",
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
         let broken = create(&db.conn, "Broken", "", "", &[], Some(&ssh("box")))
             .await
             .unwrap();
@@ -783,7 +820,10 @@ mod tests {
 
             let err = get(&db.conn, broken.id).await.unwrap_err();
             assert!(
-                matches!(err.code, crate::app_error::AppErrorCode::ConfigurationInvalid),
+                matches!(
+                    err.code,
+                    crate::app_error::AppErrorCode::ConfigurationInvalid
+                ),
                 "poison {poison:?} should be refused, got {:?}",
                 err.code
             );
@@ -800,15 +840,36 @@ mod tests {
     #[tokio::test]
     async fn reorder_updates_list_order() {
         let db = fresh_in_memory_db().await;
-        let first = create(&db.conn, "First", "http://127.0.0.1:3080", "token-a", &[], None)
-            .await
-            .unwrap();
-        let second = create(&db.conn, "Second", "http://127.0.0.1:3081", "token-b", &[], None)
-            .await
-            .unwrap();
-        let third = create(&db.conn, "Third", "http://127.0.0.1:3082", "token-c", &[], None)
-            .await
-            .unwrap();
+        let first = create(
+            &db.conn,
+            "First",
+            "http://127.0.0.1:3080",
+            "token-a",
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
+        let second = create(
+            &db.conn,
+            "Second",
+            "http://127.0.0.1:3081",
+            "token-b",
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
+        let third = create(
+            &db.conn,
+            "Third",
+            "http://127.0.0.1:3082",
+            "token-c",
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
 
         reorder(&db.conn, vec![third.id, first.id, second.id])
             .await
@@ -831,12 +892,26 @@ mod tests {
     #[tokio::test]
     async fn reorder_rejects_partial_or_duplicate_ids() {
         let db = fresh_in_memory_db().await;
-        let first = create(&db.conn, "First", "http://127.0.0.1:3080", "token-a", &[], None)
-            .await
-            .unwrap();
-        let second = create(&db.conn, "Second", "http://127.0.0.1:3081", "token-b", &[], None)
-            .await
-            .unwrap();
+        let first = create(
+            &db.conn,
+            "First",
+            "http://127.0.0.1:3080",
+            "token-a",
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
+        let second = create(
+            &db.conn,
+            "Second",
+            "http://127.0.0.1:3081",
+            "token-b",
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
 
         let duplicate = reorder(&db.conn, vec![first.id, first.id])
             .await

@@ -10,13 +10,15 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 #[cfg(feature = "tauri-runtime")]
 use crate::app_error::AppCommandError;
 #[cfg(feature = "tauri-runtime")]
+use crate::commands::remote_proxy::RemoteProxyState;
+#[cfg(feature = "tauri-runtime")]
 use crate::db::service::remote_workspace_connection_service;
 #[cfg(feature = "tauri-runtime")]
 use crate::db::AppDatabase;
 #[cfg(feature = "tauri-runtime")]
-use crate::models::{RemoteWorkspaceConnectionInfo, RemoteWorkspaceHeader, RemoteWorkspaceSshConfig, ToHeaderMap};
-#[cfg(feature = "tauri-runtime")]
-use crate::commands::remote_proxy::RemoteProxyState;
+use crate::models::{
+    RemoteWorkspaceConnectionInfo, RemoteWorkspaceHeader, RemoteWorkspaceSshConfig, ToHeaderMap,
+};
 #[cfg(feature = "tauri-runtime")]
 use std::sync::Arc;
 
@@ -123,7 +125,10 @@ pub async fn test_remote_workspace_connection(
 }
 
 #[cfg(feature = "tauri-runtime")]
-async fn validate_connection(proxy: &RemoteProxyState, input: &RemoteWorkspaceConnectionInput) -> Result<(), AppCommandError> {
+async fn validate_connection(
+    proxy: &RemoteProxyState,
+    input: &RemoteWorkspaceConnectionInput,
+) -> Result<(), AppCommandError> {
     match &input.ssh {
         Some(config) => proxy.ssh.test_config(config).await,
         None => validate_remote_health(&input.base_url, &input.token, &input.headers).await,
@@ -138,7 +143,9 @@ pub async fn create_remote_workspace_connection(
     input: RemoteWorkspaceConnectionInput,
 ) -> Result<RemoteWorkspaceConnectionInfo, AppCommandError> {
     if input.name.trim().is_empty() {
-        return Err(AppCommandError::invalid_input("Remote connection name is required"));
+        return Err(AppCommandError::invalid_input(
+            "Remote connection name is required",
+        ));
     }
     validate_connection(&proxy, &input).await?;
     remote_workspace_connection_service::create(
@@ -161,7 +168,9 @@ pub async fn update_remote_workspace_connection(
     input: RemoteWorkspaceConnectionInput,
 ) -> Result<RemoteWorkspaceConnectionInfo, AppCommandError> {
     if input.name.trim().is_empty() {
-        return Err(AppCommandError::invalid_input("Remote connection name is required"));
+        return Err(AppCommandError::invalid_input(
+            "Remote connection name is required",
+        ));
     }
     validate_connection(&proxy, &input).await?;
     let updated = remote_workspace_connection_service::update(
@@ -232,7 +241,8 @@ pub async fn open_remote_workspace(
             validate_remote_health(&resolved.base_url, &resolved.token, &resolved.headers).await?;
         }
         Ok::<_, AppCommandError>(())
-    }.await;
+    }
+    .await;
     if let Err(err) = ready {
         proxy.ssh.window_closed(id, &window_instance_id);
         return Err(err);
@@ -250,13 +260,17 @@ pub async fn open_remote_workspace(
     // h-10 title bar, so they get the workspace traffic-light position (not the
     // shorter auxiliary-window default).
     #[cfg(target_os = "macos")]
-    let builder = builder
-        .traffic_light_position(crate::commands::windows::workspace_window_traffic_light_position());
+    let builder = builder.traffic_light_position(
+        crate::commands::windows::workspace_window_traffic_light_position(),
+    );
     let window = match builder.build() {
         Ok(window) => window,
         Err(err) => {
             proxy.ssh.window_closed(id, &window_instance_id);
-            return Err(AppCommandError::window("Failed to open remote workspace", err.to_string()));
+            return Err(AppCommandError::window(
+                "Failed to open remote workspace",
+                err.to_string(),
+            ));
         }
     };
     if let Some(proxy) =

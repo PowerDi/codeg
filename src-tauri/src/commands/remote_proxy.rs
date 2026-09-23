@@ -305,7 +305,9 @@ impl RemoteProxyState {
         let label = window.label().to_string();
         let connection_id = window.url().ok().and_then(|url| {
             url.query_pairs().find_map(|(key, value)| {
-                (key == "remoteConnectionId").then(|| value.parse::<i32>().ok()).flatten()
+                (key == "remoteConnectionId")
+                    .then(|| value.parse::<i32>().ok())
+                    .flatten()
             })
         });
         if let Some(id) = connection_id {
@@ -431,7 +433,10 @@ pub async fn remote_http_call(
     args: Option<Value>,
     timeout_ms: Option<u64>,
 ) -> Result<Value, AppCommandError> {
-    let conn = proxy.ssh.resolve_connection(&db.conn, connection_id).await?;
+    let conn = proxy
+        .ssh
+        .resolve_connection(&db.conn, connection_id)
+        .await?;
 
     let url = format!(
         "{}/api/{}",
@@ -644,7 +649,10 @@ pub async fn remote_upload_attachment(
     session_id: Option<String>,
     data_base64: String,
 ) -> Result<Value, AppCommandError> {
-    let conn = proxy.ssh.resolve_connection(&db.conn, connection_id).await?;
+    let conn = proxy
+        .ssh
+        .resolve_connection(&db.conn, connection_id)
+        .await?;
 
     // Reject oversized payloads BEFORE allocating. The remote server
     // enforces the same cap on the decoded bytes, but a malicious /
@@ -869,7 +877,10 @@ pub async fn remote_upload_workspace_paths(
         ));
     }
 
-    let conn = proxy.ssh.resolve_connection(&db.conn, connection_id).await?;
+    let conn = proxy
+        .ssh
+        .resolve_connection(&db.conn, connection_id)
+        .await?;
 
     let custom_headers = conn.headers.to_header_map();
     let (transfer_id, cancel_token) = transfers.register_transfer().await;
@@ -1278,7 +1289,10 @@ async fn remote_workspace_download_stream(
     path: String,
     save_path: String,
 ) -> Result<RemoteWorkspaceDownloadResult, AppCommandError> {
-    let conn = proxy.ssh.resolve_connection(&db.conn, connection_id).await?;
+    let conn = proxy
+        .ssh
+        .resolve_connection(&db.conn, connection_id)
+        .await?;
 
     let custom_headers = conn.headers.to_header_map();
     let (transfer_id, cancel_token) = transfers.register_transfer().await;
@@ -1456,10 +1470,7 @@ async fn remote_error_from_response(
 /// request that carries the connection's custom headers with no bearer token
 /// gating them: a remote free to name any host is a remote free to choose who
 /// receives those credentials.
-fn absolute_remote_ticket_url(
-    base_url: &str,
-    ticket_url: &str,
-) -> Result<String, AppCommandError> {
+fn absolute_remote_ticket_url(base_url: &str, ticket_url: &str) -> Result<String, AppCommandError> {
     let resolved = if ticket_url.starts_with("http://") || ticket_url.starts_with("https://") {
         ticket_url.to_string()
     } else if ticket_url.starts_with('/') {
@@ -1820,7 +1831,9 @@ async fn run_ws_task(
         let mut socket = match connect_result {
             Ok(s) => s,
             Err(err) => {
-                tracing::error!("[RemoteProxy] WS connect failed for connection {connection_id}: {err}");
+                tracing::error!(
+                    "[RemoteProxy] WS connect failed for connection {connection_id}: {err}"
+                );
                 if matches!(err.code, AppErrorCode::NotFound) {
                     emit_internal(&app, &entry, &event_name, WS_UNAUTHORIZED_CHANNEL).await;
                     break;

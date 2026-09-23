@@ -121,8 +121,11 @@ pub fn build_ssh_args(
 
     match invocation {
         SshInvocation::Exec => {
-            args.extend(["-o", "ClearAllForwardings=yes", "-o", "StdinNull=no"]
-                .into_iter().map(OsString::from));
+            args.extend(
+                ["-o", "ClearAllForwardings=yes", "-o", "StdinNull=no"]
+                    .into_iter()
+                    .map(OsString::from),
+            );
             args.push(OsString::from("-o"));
             args.push(OsString::from(format!(
                 "ConnectTimeout={CONNECT_TIMEOUT_SECS}"
@@ -219,9 +222,8 @@ pub fn ssh_command(
 /// message.
 pub fn classify_ssh_failure(stderr: &str, exit_code: Option<i32>) -> AppCommandError {
     let lower = stderr.to_ascii_lowercase();
-    let detail = crate::ssh::redact::truncate_for_detail(&crate::ssh::redact::redact_secrets(
-        stderr.trim(),
-    ));
+    let detail =
+        crate::ssh::redact::truncate_for_detail(&crate::ssh::redact::redact_secrets(stderr.trim()));
 
     // Host key problems first: `StrictHostKeyChecking=yes` refuses an unknown
     // host, and codeg deliberately does not accept it on the user's behalf.
@@ -244,15 +246,13 @@ pub fn classify_ssh_failure(stderr: &str, exit_code: Option<i32>) -> AppCommandE
         || lower.contains("too many authentication failures")
         || lower.contains("publickey")
     {
-        return AppCommandError::authentication_failed(
-            "The remote host refused the SSH key.",
-        )
-        .with_detail(format!(
-            "codeg only uses non-interactive key authentication (no passwords, no MFA). \
+        return AppCommandError::authentication_failed("The remote host refused the SSH key.")
+            .with_detail(format!(
+                "codeg only uses non-interactive key authentication (no passwords, no MFA). \
              Make sure the key is loaded in ssh-agent (or set an identity file), that \
              `ssh <host>` works in a terminal without prompting, and that the key is in \
              the remote account's authorized_keys.\n\n{detail}"
-        ));
+            ));
     }
 
     if lower.contains("connection timed out")

@@ -168,7 +168,10 @@ mod tests {
     fn redacts_a_json_token_field_in_isolation() {
         let out = redact_secrets("responded with {\"token\": \"abc123\", \"port\": 1}");
         assert!(!out.contains("abc123"), "{out}");
-        assert!(out.contains("\"port\": 1"), "rest of the line survives: {out}");
+        assert!(
+            out.contains("\"port\": 1"),
+            "rest of the line survives: {out}"
+        );
     }
 
     /// Redaction is per-line: an unrelated diagnostic next to a secret must

@@ -111,7 +111,9 @@ fn error_for_code(code: &str, message: &str) -> AppCommandError {
             crate::app_error::AppErrorCode::DependencyMissing,
             fallback.to_string(),
         ),
-        "checksum_mismatch" | "checksum_malformed" | "checksum_unavailable"
+        "checksum_mismatch"
+        | "checksum_malformed"
+        | "checksum_unavailable"
         | "incomplete_archive" => AppCommandError::configuration_invalid(fallback.to_string())
             .with_detail("The remote install was aborted before anything was executed."),
         "download_failed" => AppCommandError::network(fallback.to_string()).with_detail(
@@ -136,7 +138,7 @@ fn parse_reply(stdout: &str) -> Result<BootstrapOutcome, AppCommandError> {
     let payload = stdout
         .lines()
         .filter_map(|line| line.trim().strip_prefix(RESULT_SENTINEL))
-        .last()
+        .next_back()
         .ok_or_else(|| {
             AppCommandError::new(
                 crate::app_error::AppErrorCode::TaskExecutionFailed,
@@ -155,7 +157,11 @@ fn parse_reply(stdout: &str) -> Result<BootstrapOutcome, AppCommandError> {
             crate::app_error::AppErrorCode::TaskExecutionFailed,
             "The remote bootstrap result could not be parsed.",
         )
-        .with_detail(format!("Invalid JSON at line {}, column {}", e.line(), e.column()))
+        .with_detail(format!(
+            "Invalid JSON at line {}, column {}",
+            e.line(),
+            e.column()
+        ))
     })?;
 
     match reply {
@@ -179,7 +185,10 @@ fn parse_reply(stdout: &str) -> Result<BootstrapOutcome, AppCommandError> {
                 reused,
             })
         }
-        BootstrapReply::Error { code, message } => Err(error_for_code(&code, &crate::ssh::redact::truncate_for_detail(&redact_secrets(&message)))),
+        BootstrapReply::Error { code, message } => Err(error_for_code(
+            &code,
+            &crate::ssh::redact::truncate_for_detail(&redact_secrets(&message)),
+        )),
     }
 }
 
@@ -240,16 +249,11 @@ pub async fn run_bootstrap(
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    if !output.status.success() {
-        // A non-zero ssh exit with no result line is an SSH-level failure
-        // (auth, host key, connectivity) — the case the user most needs
-        // actionable wording for.
-        if !stdout.contains(RESULT_SENTINEL) {
-            return Err(crate::ssh::command::classify_ssh_failure(
-                &stderr,
-                output.status.code(),
-            ));
-        }
+    if !output.status.success() && !stdout.contains(RESULT_SENTINEL) {
+        return Err(crate::ssh::command::classify_ssh_failure(
+            &stderr,
+            output.status.code(),
+        ));
     }
 
     let outcome = parse_reply(&stdout).map_err(|err| {
@@ -261,7 +265,9 @@ pub async fn run_bootstrap(
         if trimmed.is_empty() || err.detail.is_some() {
             err
         } else {
-            err.with_detail(crate::ssh::redact::truncate_for_detail(&redact_secrets(trimmed)))
+            err.with_detail(crate::ssh::redact::truncate_for_detail(&redact_secrets(
+                trimmed,
+            )))
         }
     })?;
     if outcome.version != requested_version() {
@@ -279,9 +285,14 @@ const OUTPUT_LIMIT: u64 = 256 * 1024;
 
 async fn read_bounded(reader: impl AsyncRead + Unpin) -> std::io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
-    reader.take(OUTPUT_LIMIT + 1).read_to_end(&mut bytes).await?;
+    reader
+        .take(OUTPUT_LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .await?;
     if bytes.len() as u64 > OUTPUT_LIMIT {
-        return Err(std::io::Error::other("SSH output exceeded the 256 KiB safety limit"));
+        return Err(std::io::Error::other(
+            "SSH output exceeded the 256 KiB safety limit",
+        ));
     }
     Ok(bytes)
 }
@@ -293,11 +304,17 @@ async fn bounded_ssh_output(
     payload: &[u8],
     deadline: Duration,
 ) -> Result<std::process::Output, AppCommandError> {
-    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
     let mut child = command.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
-            AppCommandError::new(crate::app_error::AppErrorCode::DependencyMissing,
-                "The system ssh client was not found. Install OpenSSH Client and put ssh on PATH.")
+            AppCommandError::new(
+                crate::app_error::AppErrorCode::DependencyMissing,
+                "The system ssh client was not found. Install OpenSSH Client and put ssh on PATH.",
+            )
         } else {
             AppCommandError::io_error("Could not start the ssh client").with_detail(e.to_string())
         }
@@ -313,13 +330,24 @@ async fn bounded_ssh_output(
         Ok::<_, std::io::Error>(())
     };
     let operation = async {
-        let (status, (), stdout, stderr) = tokio::try_join!(child.wait(), write,
-            read_bounded(stdout), read_bounded(stderr))?;
-        Ok::<_, std::io::Error>(std::process::Output { status, stdout, stderr })
+        let (status, (), stdout, stderr) = tokio::try_join!(
+            child.wait(),
+            write,
+            read_bounded(stdout),
+            read_bounded(stderr)
+        )?;
+        Ok::<_, std::io::Error>(std::process::Output {
+            status,
+            stdout,
+            stderr,
+        })
     };
-    tokio::time::timeout(deadline, operation).await
-        .map_err(|_| AppCommandError::task_execution_failed("The remote bootstrap timed out")
-            .with_detail(format!("No result after {} seconds", deadline.as_secs())))?
+    tokio::time::timeout(deadline, operation)
+        .await
+        .map_err(|_| {
+            AppCommandError::task_execution_failed("The remote bootstrap timed out")
+                .with_detail(format!("No result after {} seconds", deadline.as_secs()))
+        })?
         .map_err(|e| AppCommandError::io_error("The ssh client failed").with_detail(e.to_string()))
 }
 
@@ -344,7 +372,9 @@ mod tests {
         let mut command = crate::process::tokio_command("sh");
         command.args(["-c", "exec sleep 30"]);
         let payload = vec![b'x'; 1024 * 1024];
-        let err = bounded_ssh_output(command, &payload, Duration::from_millis(100)).await.unwrap_err();
+        let err = bounded_ssh_output(command, &payload, Duration::from_millis(100))
+            .await
+            .unwrap_err();
         assert!(err.message.contains("timed out"));
     }
 
@@ -353,13 +383,20 @@ mod tests {
     async fn excessive_remote_output_is_bounded() {
         let mut command = crate::process::tokio_command("sh");
         command.args(["-c", "head -c 300000 /dev/zero"]);
-        let err = bounded_ssh_output(command, &[], Duration::from_secs(3)).await.unwrap_err();
+        let err = bounded_ssh_output(command, &[], Duration::from_secs(3))
+            .await
+            .unwrap_err();
         assert!(err.detail.unwrap().contains("safety limit"));
     }
 
     #[test]
     fn outcome_debug_never_contains_the_token() {
-        let outcome = BootstrapOutcome { port: 42000, token: "secret-value".into(), version: "0.31.2".into(), reused: false };
+        let outcome = BootstrapOutcome {
+            port: 42000,
+            token: "secret-value".into(),
+            version: "0.31.2".into(),
+            reused: false,
+        };
         assert!(!format!("{outcome:?}").contains("secret-value"));
     }
 
@@ -432,7 +469,11 @@ mod tests {
                  \"message\":\"boom\"}}"
             );
             let err = parse_reply(&json).unwrap_err();
-            assert_eq!(std::mem::discriminant(&err.code), std::mem::discriminant(&expected), "wrong code mapping for {code}");
+            assert_eq!(
+                std::mem::discriminant(&err.code),
+                std::mem::discriminant(&expected),
+                "wrong code mapping for {code}"
+            );
             assert_eq!(err.message, "boom");
         }
     }
@@ -465,7 +506,10 @@ mod tests {
         let prelude = script_prelude(requested_version());
         for line in prelude.lines() {
             let Some((_, value)) = line.split_once('=') else {
-                assert!(line.starts_with("export "), "unexpected prelude line: {line}");
+                assert!(
+                    line.starts_with("export "),
+                    "unexpected prelude line: {line}"
+                );
                 continue;
             };
             assert!(
@@ -580,7 +624,7 @@ mod tests {
         let kills: Vec<&str> = BOOTSTRAP_SCRIPT
             .lines()
             .map(str::trim)
-            .filter(|line| line.starts_with("kill ") || line.starts_with("kill -9"))
+            .filter(|line| line.starts_with("kill ") && !line.starts_with("kill -0 "))
             .collect();
 
         for line in &kills {
@@ -621,7 +665,10 @@ mod tests {
              \"message\":\"left alone in case agents are still working\"}",
         )
         .unwrap_err();
-        assert!(matches!(err.code, crate::app_error::AppErrorCode::TaskExecutionFailed));
+        assert!(matches!(
+            err.code,
+            crate::app_error::AppErrorCode::TaskExecutionFailed
+        ));
         assert!(err.message.contains("left alone"));
     }
 
@@ -680,7 +727,8 @@ mod tests {
     #[test]
     fn the_background_server_drops_stdin_and_the_lock_fd() {
         assert!(
-            BOOTSTRAP_SCRIPT.contains("nohup \"$SERVER_BIN\" </dev/null >>\"$SERVER_LOG\" 2>&1 9>&- &"),
+            BOOTSTRAP_SCRIPT
+                .contains("nohup \"$SERVER_BIN\" </dev/null >>\"$SERVER_LOG\" 2>&1 9>&- &"),
             "the server must be started with stdin from /dev/null and fd 9 closed"
         );
     }
@@ -712,8 +760,15 @@ mod tests {
         assert!(BOOTSTRAP_SCRIPT.contains("checksum_mismatch"));
         assert!(BOOTSTRAP_SCRIPT.contains(".sha256"));
         // The chmod +x must come after the comparison.
-        let verify = BOOTSTRAP_SCRIPT.find("checksum verified").expect("verify log");
-        let chmod = BOOTSTRAP_SCRIPT.find("chmod 700 \"${staged}").expect("chmod");
-        assert!(verify < chmod, "binaries must not be made executable before verification");
+        let verify = BOOTSTRAP_SCRIPT
+            .find("checksum verified")
+            .expect("verify log");
+        let chmod = BOOTSTRAP_SCRIPT
+            .find("chmod 700 \"${staged}")
+            .expect("chmod");
+        assert!(
+            verify < chmod,
+            "binaries must not be made executable before verification"
+        );
     }
 }

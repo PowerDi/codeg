@@ -19,7 +19,11 @@ impl MigrationTrait for Migration {
             .alter_table(
                 Table::alter()
                     .table(RemoteWorkspaceConnection::Table)
-                    .add_column(ColumnDef::new(RemoteWorkspaceConnection::SshConfig).text().null())
+                    .add_column(
+                        ColumnDef::new(RemoteWorkspaceConnection::SshConfig)
+                            .text()
+                            .null(),
+                    )
                     .to_owned(),
             )
             .await

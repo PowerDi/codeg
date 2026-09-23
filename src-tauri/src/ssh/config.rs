@@ -228,7 +228,12 @@ mod tests {
 
     #[test]
     fn rejects_control_characters_and_newlines_in_host() {
-        for host in ["box\nProxyCommand=evil", "box\r\nHost other", "box\0", "a\tb"] {
+        for host in [
+            "box\nProxyCommand=evil",
+            "box\r\nHost other",
+            "box\0",
+            "a\tb",
+        ] {
             assert!(
                 validate_ssh_config(&cfg(host)).is_err(),
                 "host {host:?} must be rejected"
@@ -302,7 +307,10 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            validate_ssh_config(&input).unwrap().identity_file.as_deref(),
+            validate_ssh_config(&input)
+                .unwrap()
+                .identity_file
+                .as_deref(),
             Some(r"C:\Users\Ann Smith\.ssh\id_ed25519")
         );
     }

@@ -2,7 +2,7 @@
 # GitHub-hosted Linux runner ONLY. No user SSH credentials or external host.
 set -euo pipefail
 [[ "${GITHUB_ACTIONS:-}" == "true" ]] || { echo "Requires a disposable GitHub Actions runner" >&2; exit 1; }
-root="$(mktemp -d "${RUNNER_TEMP}/codeg-ssh-ci.XXXXXX")"
+root="$(mktemp -d /tmp/codeg-ssh-ci.XXXXXX)"
 test_user=codeg-ssh-ci
 home="${root}/home"
 # sshd must be able to enter the account's home after dropping privileges.

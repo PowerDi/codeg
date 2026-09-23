@@ -46,6 +46,7 @@ jobs:
         with:
           workspaces: ./src-tauri -> target
           shared-key: test-ubuntu-22.04-desktop
+          cache-on-failure: true
       - name: Desktop dependencies and test assets
         run: |
           sudo apt-get update
@@ -72,13 +73,17 @@ jobs:
         working-directory: src-tauri
         run: cargo test --features test-utils --lib
       - name: Isolated SSH install, reuse, HTTP and WebSocket recovery
+        if: ${{ !cancelled() }}
         run: bash scripts/ssh-workspace-ci.sh
       - name: Desktop clippy
+        if: ${{ !cancelled() }}
         working-directory: src-tauri
         run: cargo clippy --all-targets --features test-utils -- -D warnings
       - name: Server tests
+        if: ${{ !cancelled() }}
         working-directory: src-tauri
         run: cargo test --no-default-features --bin codeg-server --lib
       - name: Server and companion clippy
+        if: ${{ !cancelled() }}
         working-directory: src-tauri
         run: cargo clippy --no-default-features --bin codeg-server --bin codeg-mcp --lib -- -D warnings
