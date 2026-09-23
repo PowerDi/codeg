@@ -312,5 +312,8 @@ pub fn answer_ssh_auth_prompt(
     request_id: String,
     answer: Option<String>,
 ) -> Result<(), AppCommandError> {
-    proxy.ssh.prompts.answer(window.label(), &request_id, answer)
+    proxy
+        .ssh
+        .prompts
+        .answer(window.label(), &request_id, answer)
 }

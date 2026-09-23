@@ -48,13 +48,16 @@ fn exchange(address: SocketAddr, request: &AskpassRequest) -> io::Result<Zeroizi
     frame.push(b'\n');
     stream.write_all(&frame)?;
     let mut response = Zeroizing::new(Vec::new());
-    io::BufReader::new(stream.take((FRAME_LIMIT + 1) as u64))
-        .read_until(b'\n', &mut response)?;
+    io::BufReader::new(stream.take((FRAME_LIMIT + 1) as u64)).read_until(b'\n', &mut response)?;
     if response.len() > FRAME_LIMIT || response.last() != Some(&b'\n') {
         return Err(io::Error::other("invalid askpass response"));
     }
     let reply: AskpassReply = serde_json::from_slice(&response)?;
-    let answer = Zeroizing::new(reply.answer.ok_or_else(|| io::Error::other("askpass declined"))?);
+    let answer = Zeroizing::new(
+        reply
+            .answer
+            .ok_or_else(|| io::Error::other("askpass declined"))?,
+    );
     if !valid_answer(&answer) {
         return Err(io::Error::other("invalid askpass answer"));
     }
@@ -71,7 +74,9 @@ pub fn run_if_requested() -> Option<u8> {
         if token.len() != 64 {
             return Err(io::Error::other("invalid askpass capability"));
         }
-        let prompt = std::env::args().nth(1).ok_or_else(|| io::Error::other("missing SSH prompt"))?;
+        let prompt = std::env::args()
+            .nth(1)
+            .ok_or_else(|| io::Error::other("missing SSH prompt"))?;
         let answer = exchange(address, &AskpassRequest { token, prompt })?;
         let mut output = io::stdout().lock();
         output.write_all(answer.as_bytes())?;
@@ -98,7 +103,12 @@ mod tests {
     fn helper_cannot_send_credentials_off_machine() {
         assert!(loopback_address("127.0.0.1:1234").is_ok());
         assert!(loopback_address("[::1]:1234").is_ok());
-        for invalid in ["example.com:22", "192.0.2.1:1234", "127.0.0.1:0", "0.0.0.0:1234"] {
+        for invalid in [
+            "example.com:22",
+            "192.0.2.1:1234",
+            "127.0.0.1:0",
+            "0.0.0.0:1234",
+        ] {
             assert!(loopback_address(invalid).is_err());
         }
     }
@@ -110,14 +120,23 @@ mod tests {
         let server = std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().unwrap();
             let mut request = String::new();
-            io::BufReader::new(socket.try_clone().unwrap()).read_line(&mut request).unwrap();
+            io::BufReader::new(socket.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
             let request: AskpassRequest = serde_json::from_str(&request).unwrap();
             assert_eq!(request.token, "capability");
-            socket.write_all(b"{\"answer\":\"  secret with spaces  \"}\n").unwrap();
+            socket
+                .write_all(b"{\"answer\":\"  secret with spaces  \"}\n")
+                .unwrap();
         });
-        let answer = exchange(address, &AskpassRequest {
-            token: "capability".into(), prompt: "user@host's password: ".into(),
-        }).unwrap();
+        let answer = exchange(
+            address,
+            &AskpassRequest {
+                token: "capability".into(),
+                prompt: "user@host's password: ".into(),
+            },
+        )
+        .unwrap();
         assert_eq!(answer.as_str(), "  secret with spaces  ");
         server.join().unwrap();
     }

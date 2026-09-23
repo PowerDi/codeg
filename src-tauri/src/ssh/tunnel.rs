@@ -179,9 +179,21 @@ impl SshManager {
         credentials: Arc<CredentialCache>,
     ) -> Result<Option<AskpassServer>, AppCommandError> {
         // Non-GUI tests keep the existing fail-closed, batch-mode behavior.
-        if !self.prompts.available() { return Ok(None); }
-        let helper = std::env::current_exe().map_err(|_| AppCommandError::io_error("Could not locate the SSH authentication helper"))?;
-        AskpassServer::start(helper, config.host.clone(), owner_window.into(), self.prompts.clone(), credentials).await.map(Some)
+        if !self.prompts.available() {
+            return Ok(None);
+        }
+        let helper = std::env::current_exe().map_err(|_| {
+            AppCommandError::io_error("Could not locate the SSH authentication helper")
+        })?;
+        AskpassServer::start(
+            helper,
+            config.host.clone(),
+            owner_window.into(),
+            self.prompts.clone(),
+            credentials,
+        )
+        .await
+        .map(Some)
     }
 
     pub fn register_window(&self, id: i32, instance: &str) {
@@ -252,14 +264,23 @@ impl SshManager {
                             *previous = Some(config.clone());
                         }
                     }
-                    let window = session.prompt_window.lock().unwrap().clone()
+                    let window = session
+                        .prompt_window
+                        .lock()
+                        .unwrap()
+                        .clone()
                         .unwrap_or_else(|| format!("remote-workspace-{id}"));
-                    let askpass = self.askpass(config, &window, session.credentials.clone()).await?;
+                    let askpass = self
+                        .askpass(config, &window, session.credentials.clone())
+                        .await?;
                     let result = async {
                         let outcome = run_bootstrap_with_askpass(config, askpass.as_ref()).await?;
                         self.open_tunnel(config, &outcome, askpass.as_ref()).await
-                    }.await;
-                    if result.is_err() { session.credentials.clear(); }
+                    }
+                    .await;
+                    if result.is_err() {
+                        session.credentials.clear();
+                    }
                     *tunnel = Some(result?);
                 }
                 let active = tunnel.as_ref().expect("tunnel established above");
@@ -361,7 +382,11 @@ impl SshManager {
                 stderr_task,
                 stdout_task,
             };
-            let ready_timeout = if askpass.is_some() { Duration::from_secs(240) } else { TUNNEL_READY_TIMEOUT };
+            let ready_timeout = if askpass.is_some() {
+                Duration::from_secs(240)
+            } else {
+                TUNNEL_READY_TIMEOUT
+            };
             let ready = tokio::time::timeout(ready_timeout, async {
                 if !ready_rx.await.unwrap_or(false) || active.exited() {
                     return false;
@@ -378,9 +403,13 @@ impl SshManager {
                 return Ok(active);
             }
             detail = active.error_detail();
-            if let Some(auth) = askpass { detail = auth.redact(&detail); }
+            if let Some(auth) = askpass {
+                detail = auth.redact(&detail);
+            }
             let _ = active.child.kill().await;
-            if let Some(error) = askpass.and_then(|auth| auth.failure()) { return Err(error); }
+            if let Some(error) = askpass.and_then(|auth| auth.failure()) {
+                return Err(error);
+            }
             if detail.to_ascii_lowercase().contains("permission denied") {
                 return Err(crate::ssh::command::classify_ssh_failure(&detail, None));
             }
@@ -422,6 +451,7 @@ impl SshManager {
 
     pub async fn shutdown_all(&self) {
         self.cancelled.cancel();
+        self.prompts.shutdown();
         let sessions = {
             let mut state = self.state.lock().unwrap();
             state.closing = true;

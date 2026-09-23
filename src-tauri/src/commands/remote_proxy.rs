@@ -1311,7 +1311,8 @@ async fn remote_workspace_download_stream(
 
         // Resolve only after the semaphore: a queued transfer may have waited
         // while the WebSocket path rebuilt the SSH tunnel on a different port.
-        let conn = resolve_transfer_connection(&proxy, &db.conn, connection_id, &cancel_token).await?;
+        let conn =
+            resolve_transfer_connection(&proxy, &db.conn, connection_id, &cancel_token).await?;
         let custom_headers = conn.headers.to_header_map();
 
         let ticket_url = format!(
@@ -2063,16 +2064,16 @@ pub(crate) async fn connect_with_subprotocol_auth(
     let mut protocols = HeaderValue::from_str(&protocols_value)
         .map_err(|e| format!("invalid subprotocol value: {e}"))?;
     protocols.set_sensitive(true);
-    request.headers_mut().insert("sec-websocket-protocol", protocols);
+    request
+        .headers_mut()
+        .insert("sec-websocket-protocol", protocols);
     request.headers_mut().extend(custom_headers.clone());
 
-    let (stream, _resp) = tokio::time::timeout(
-        HTTP_TIMEOUT,
-        tokio_tungstenite::connect_async(request),
-    )
-    .await
-    .map_err(|_| "Remote WebSocket handshake timed out".to_string())?
-    .map_err(|e| format!("connect_async: {e}"))?;
+    let (stream, _resp) =
+        tokio::time::timeout(HTTP_TIMEOUT, tokio_tungstenite::connect_async(request))
+            .await
+            .map_err(|_| "Remote WebSocket handshake timed out".to_string())?
+            .map_err(|e| format!("connect_async: {e}"))?;
     Ok(stream)
 }
 
@@ -2124,19 +2125,40 @@ mod tests {
         let db = crate::db::test_helpers::fresh_in_memory_db().await;
         let proxy = RemoteProxyState::new();
         let profile = remote_workspace_connection_service::create(
-            &db.conn, "transfer", "http://localhost:1234", "old", &[], None,
-        ).await.unwrap();
+            &db.conn,
+            "transfer",
+            "http://localhost:1234",
+            "old",
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
         let cancel = CancellationToken::new();
-        let first = resolve_transfer_connection(&proxy, &db.conn, profile.id, &cancel).await.unwrap();
+        let first = resolve_transfer_connection(&proxy, &db.conn, profile.id, &cancel)
+            .await
+            .unwrap();
         assert_eq!(first.base_url, "http://localhost:1234");
         remote_workspace_connection_service::update(
-            &db.conn, profile.id, "transfer", "http://localhost:1235", "new", &[], None,
-        ).await.unwrap();
-        let next = resolve_transfer_connection(&proxy, &db.conn, profile.id, &cancel).await.unwrap();
+            &db.conn,
+            profile.id,
+            "transfer",
+            "http://localhost:1235",
+            "new",
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
+        let next = resolve_transfer_connection(&proxy, &db.conn, profile.id, &cancel)
+            .await
+            .unwrap();
         assert_eq!(next.base_url, "http://localhost:1235");
         assert_eq!(next.token, "new");
         cancel.cancel();
-        let err = resolve_transfer_connection(&proxy, &db.conn, -1, &cancel).await.unwrap_err();
+        let err = resolve_transfer_connection(&proxy, &db.conn, -1, &cancel)
+            .await
+            .unwrap_err();
         assert!(err.message.to_ascii_lowercase().contains("cancel"));
     }
 

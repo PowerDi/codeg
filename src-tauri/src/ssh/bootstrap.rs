@@ -228,7 +228,11 @@ pub fn bootstrap_payload(version: &str) -> String {
 fn payload_with_script(version: &str, script: &str) -> String {
     // A Windows source checkout may use CRLF. The payload is executed by a
     // Linux shell, where a carriage return becomes part of the command/argv.
-    format!("{}{}", script_prelude(version), script.replace("\r\n", "\n"))
+    format!(
+        "{}{}",
+        script_prelude(version),
+        script.replace("\r\n", "\n")
+    )
 }
 
 /// Run the bootstrap on `locator`'s host.
@@ -258,7 +262,9 @@ pub async fn run_bootstrap_with_askpass(
 
     let payload = bootstrap_payload(requested_version());
     let output = bounded_ssh_output(command, payload.as_bytes(), BOOTSTRAP_TIMEOUT).await;
-    if let Some(error) = askpass.and_then(|auth| auth.failure()) { return Err(error); }
+    if let Some(error) = askpass.and_then(|auth| auth.failure()) {
+        return Err(error);
+    }
     let output = output?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

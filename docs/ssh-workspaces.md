@@ -90,7 +90,9 @@ The built desktop executable handles askpass before starting logging or Tauri.
   discarded when that operation ends.
 - Cached answers are scoped to the profile/configuration and the exact OpenSSH
   prompt, so different destination users, jump hosts and key files do not share
-  an answer. Host-key approvals are not cached by Codeg.
+  an answer. Repeated/ambiguous hop prompts require fresh input rather than
+  automatic reuse, and trusting a new host key clears old cached credentials.
+  Host-key approvals are not cached by Codeg.
 - Cancel and unanswered prompts fail closed. Cancelling a live session's prompt
   suppresses further automatic prompts for that session; close and reopen its
   workspace to try again. A missing/closed window also cancels its prompt.

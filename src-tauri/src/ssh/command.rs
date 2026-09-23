@@ -24,14 +24,26 @@ const CONNECT_TIMEOUT_SECS: u32 = 20;
 /// auto-accepts host keys, reads passwords from stdin, or joins a shared master.
 fn base_options(interactive: bool) -> Vec<(&'static str, String)> {
     vec![
-        ("BatchMode", if interactive { "no" } else { "yes" }.to_string()),
-        ("StrictHostKeyChecking", if interactive { "ask" } else { "yes" }.to_string()),
+        (
+            "BatchMode",
+            if interactive { "no" } else { "yes" }.to_string(),
+        ),
+        (
+            "StrictHostKeyChecking",
+            if interactive { "ask" } else { "yes" }.to_string(),
+        ),
         ("FingerprintHash", "sha256".to_string()),
         // Passwords/passphrases go only through our helper. Arbitrary remote
         // keyboard-interactive challenges cannot impersonate a cached prompt.
-        ("PasswordAuthentication", if interactive { "yes" } else { "no" }.to_string()),
+        (
+            "PasswordAuthentication",
+            if interactive { "yes" } else { "no" }.to_string(),
+        ),
         ("KbdInteractiveAuthentication", "no".to_string()),
-        ("NumberOfPasswordPrompts", if interactive { "1" } else { "0" }.to_string()),
+        (
+            "NumberOfPasswordPrompts",
+            if interactive { "1" } else { "0" }.to_string(),
+        ),
         // `ssh` must not read a terminal even if one is somehow attached.
         ("RequestTTY", "no".to_string()),
         ("SessionType", "default".to_string()),
@@ -150,7 +162,11 @@ fn build_ssh_args_with_interaction(
             )));
             // A tiny remote command acknowledges forwarding setup, then
             // waits for stdin EOF. Do not use -N: that would suppress its ack.
-            args.extend(["-o", "ClearAllForwardings=no"].into_iter().map(OsString::from));
+            args.extend(
+                ["-o", "ClearAllForwardings=no"]
+                    .into_iter()
+                    .map(OsString::from),
+            );
             args.push(OsString::from("-T"));
             args.push(OsString::from("-L"));
             args.push(OsString::from(format!(
@@ -209,9 +225,16 @@ pub fn ssh_command_with_askpass(
     askpass: Option<&crate::ssh::askpass::AskpassServer>,
 ) -> tokio::process::Command {
     let mut command = crate::process::tokio_command("ssh");
-    command.args(build_ssh_args_with_interaction(config, invocation, remote_command, askpass.is_some()));
+    command.args(build_ssh_args_with_interaction(
+        config,
+        invocation,
+        remote_command,
+        askpass.is_some(),
+    ));
     command.env("SSH_ASKPASS_REQUIRE", "never");
-    if let Some(askpass) = askpass { askpass.apply(&mut command); }
+    if let Some(askpass) = askpass {
+        askpass.apply(&mut command);
+    }
     command
 }
 
@@ -252,12 +275,14 @@ pub fn classify_ssh_failure(stderr: &str, exit_code: Option<i32>) -> AppCommandE
         || lower.contains("too many authentication failures")
         || lower.contains("publickey")
     {
-        return AppCommandError::authentication_failed("The remote host refused SSH authentication.")
-            .with_detail(format!(
-                "Check the username and password, or use an authorized key / ssh-agent. \
+        return AppCommandError::authentication_failed(
+            "The remote host refused SSH authentication.",
+        )
+        .with_detail(format!(
+            "Check the username and password, or use an authorized key / ssh-agent. \
              The server must allow password or public-key authentication. \
              Keyboard-interactive MFA is not supported.\n\n{detail}"
-            ));
+        ));
     }
 
     if lower.contains("connection timed out")
@@ -308,11 +333,31 @@ mod tests {
     /// on an unanswerable prompt or trusting unverified host keys.
     #[test]
     fn gui_authentication_keeps_host_verification_and_owned_processes() {
-        let config = RemoteWorkspaceSshConfig { host: "server".into(), ..Default::default() };
-        let args: Vec<String> = build_ssh_args_with_interaction(&config, SshInvocation::Exec, Some("true"), true)
-            .iter().map(|value| value.to_string_lossy().into_owned()).collect();
-        for expected in ["BatchMode=no", "StrictHostKeyChecking=ask", "FingerprintHash=sha256", "PasswordAuthentication=yes", "NumberOfPasswordPrompts=1", "KbdInteractiveAuthentication=no", "ControlMaster=no", "ControlPath=none"] {
-            assert_eq!(args.iter().filter(|value| value.as_str() == expected).count(), 1);
+        let config = RemoteWorkspaceSshConfig {
+            host: "server".into(),
+            ..Default::default()
+        };
+        let args: Vec<String> =
+            build_ssh_args_with_interaction(&config, SshInvocation::Exec, Some("true"), true)
+                .iter()
+                .map(|value| value.to_string_lossy().into_owned())
+                .collect();
+        for expected in [
+            "BatchMode=no",
+            "StrictHostKeyChecking=ask",
+            "FingerprintHash=sha256",
+            "PasswordAuthentication=yes",
+            "NumberOfPasswordPrompts=1",
+            "KbdInteractiveAuthentication=no",
+            "ControlMaster=no",
+            "ControlPath=none",
+        ] {
+            assert_eq!(
+                args.iter()
+                    .filter(|value| value.as_str() == expected)
+                    .count(),
+                1
+            );
         }
         assert!(!args.contains(&"BatchMode=yes".into()));
         assert!(!args.contains(&"StrictHostKeyChecking=no".into()));

@@ -115,6 +115,18 @@ describe("SshAuthDialog", () => {
     })
   })
 
+  it("treats Escape as cancellation, never host approval", async () => {
+    await mount()
+    await send(prompt({ kind: "hostKey" }))
+    await act(async () => {
+      fireEvent.keyDown(screen.getByRole("alertdialog"), { key: "Escape" })
+    })
+    expect(mocks.answer).toHaveBeenCalledWith("answer_ssh_auth_prompt", {
+      requestId: "first",
+      answer: null,
+    })
+  })
+
   it("accepts a host only after an explicit trust click", async () => {
     await mount()
     await send(prompt({ kind: "hostKey" }))

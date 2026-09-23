@@ -20,7 +20,8 @@ import paramiko
 
 def main():
     executable = Path(sys.argv[1]).resolve(strict=True)
-    password, capability = secrets.token_hex(32), secrets.token_hex(32)
+    password = "  '\"$&|; " + secrets.token_hex(16) + " \u4f60\u597d  "
+    capability = secrets.token_hex(32)
     key = paramiko.RSAKey.generate(2048)
     fingerprint = "SHA256:" + base64.b64encode(hashlib.sha256(key.asbytes()).digest()).decode().rstrip("=")
     prompts, failures = [], []
