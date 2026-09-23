@@ -92,6 +92,14 @@ export CODEG_SSH_TEST_HOST=codeg-ssh-ci
 cd src-tauri
 cargo test --features test-utils --lib isolated_sshd_install_reuse_tunnel_and_reconnect -- --ignored --nocapture
 
+# Tauri copies externalBin's zero-byte development placeholder over
+# target/debug/codeg-mcp during desktop builds (potentially a Cargo hardlink).
+# Force a fresh helper link, then copy it OUTSIDE Cargo/Tauri's output directory
+# before cargo test can rebuild the desktop and stage that placeholder again.
+touch src/bin/codeg_mcp.rs
 cargo build --no-default-features --bin codeg-mcp
-export CODEG_SSH_TEST_HELPER="$PWD/target/debug/codeg-mcp"
+test -s target/debug/codeg-mcp
+install -m 700 target/debug/codeg-mcp "$root/askpass-helper"
+file "$root/askpass-helper"
+export CODEG_SSH_TEST_HELPER="$root/askpass-helper"
 cargo test --features test-utils --lib isolated_sshd_password_host_trust_and_helper -- --ignored --nocapture
