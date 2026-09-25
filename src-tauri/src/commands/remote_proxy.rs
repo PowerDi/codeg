@@ -460,9 +460,21 @@ pub async fn remote_http_call(
         let requested = Duration::from_millis(ms);
         request = request.timeout(requested.min(HTTP_TIMEOUT_MAX));
     }
-    let response = request.send().await.map_err(|e| {
-        AppCommandError::network("Remote HTTP request failed").with_detail(request_error_detail(&e))
-    })?;
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(err) => {
+            // A server self-update keeps the SSH process alive but briefly
+            // drops the loopback listener. The current forward then points at
+            // a dead endpoint; retire it so the next health poll resolves the
+            // state file/bootstrap again instead of retrying the stale tunnel
+            // for the whole update timeout.
+            if conn.is_ssh() {
+                proxy.ssh.reset_tunnel(connection_id).await;
+            }
+            return Err(AppCommandError::network("Remote HTTP request failed")
+                .with_detail(request_error_detail(&err)));
+        }
+    };
 
     let status = response.status();
 
