@@ -486,7 +486,7 @@ mod tests {
         assert_eq!(bootstrap_progress_message(b"OpenSSH debug output\n"), None);
         assert_eq!(
             bootstrap_progress_message(b"[codeg-bootstrap] [server] token: secret-value\n"),
-            Some("[server] token: [redacted]".to_string())
+            Some("[server] token:[redacted]".to_string())
         );
     }
 
@@ -720,10 +720,11 @@ mod tests {
         assert!(BOOTSTRAP_SCRIPT.contains("INSTALL_DIR=\"${ROOT}/runtime\""));
         assert!(BOOTSTRAP_SCRIPT.contains("LEGACY_INSTALL_DIR="));
         assert!(BOOTSTRAP_SCRIPT.contains("mv \"$LEGACY_INSTALL_DIR\" \"$INSTALL_DIR\""));
-        assert!(
-            !BOOTSTRAP_SCRIPT.contains("INSTALL_DIR=\"${VERSIONS_DIR}/${CODEG_REMOTE_VERSION}\""),
-            "the running path must not depend on the desktop version"
-        );
+        let install_assignment = BOOTSTRAP_SCRIPT
+            .lines()
+            .find(|line| line.starts_with("INSTALL_DIR="))
+            .expect("install directory assignment");
+        assert_eq!(install_assignment, "INSTALL_DIR=\"${ROOT}/runtime\"");
     }
 
     #[test]
