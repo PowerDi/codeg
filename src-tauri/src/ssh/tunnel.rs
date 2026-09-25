@@ -618,10 +618,18 @@ async fn health_ok(client: &reqwest::Client, base_url: &str, token: &str) -> boo
             Err(_) => return false,
         }
     }
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+    health_body_ok(&body)
+}
+
+fn health_body_ok(body: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
         return false;
     };
-    value["status"] == "ok" && value["version"] == env!("CARGO_PKG_VERSION")
+    // The bearer token and the documented health status establish that this is
+    // the managed codeg-server. Its application version may legitimately move
+    // ahead after an in-place server update; tunnel reachability must not turn
+    // the desktop package version into a second compatibility gate.
+    value["status"] == "ok"
 }
 
 async fn pick_local_port() -> Result<u16, AppCommandError> {
@@ -659,6 +667,18 @@ async fn tunnel_port_open(port: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tunnel_health_accepts_a_different_remote_application_version() {
+        assert!(health_body_ok(
+            br#"{"status":"ok","version":"0.32.2"}"#
+        ));
+        assert!(health_body_ok(br#"{"status":"ok"}"#));
+        assert!(!health_body_ok(
+            br#"{"status":"starting","version":"0.32.2"}"#
+        ));
+        assert!(!health_body_ok(b"not-json"));
+    }
 
     #[test]
     fn saved_password_key_is_scoped_to_the_profile_credential_id() {
