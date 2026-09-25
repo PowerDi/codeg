@@ -298,7 +298,7 @@ impl SshManager {
                     let askpass = self
                         .askpass(config, &window, session.credentials.clone())
                         .await?;
-                    let result = async {
+                    let result: Result<ActiveTunnel, AppCommandError> = async {
                         let outcome = run_bootstrap_with_askpass(config, askpass.as_ref()).await?;
                         let tunnel = self.open_tunnel(config, &outcome, askpass.as_ref()).await?;
                         session.credentials.persist_passwords().map_err(|detail| {
@@ -395,7 +395,9 @@ impl SshManager {
                     report(format!("Connecting to {}", config.host));
                 }
                 let credentials = self.form_credentials(owner_window, &config);
-                let askpass = self.askpass(&config, owner_window, credentials).await?;
+                let askpass = self
+                    .askpass(&config, owner_window, credentials.clone())
+                    .await?;
                 let result = async {
                     let outcome = run_bootstrap_with_askpass_and_progress(
                         &config,
