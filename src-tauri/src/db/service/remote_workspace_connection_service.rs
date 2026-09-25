@@ -619,6 +619,8 @@ mod tests {
                 username: Some("ann".into()),
                 port: Some(2222),
                 identity_file: Some("~/.ssh/id_ed25519".into()),
+                remember_password: true,
+                credential_id: Some("73baf9d8-b681-4f2f-bf89-4ece1396fc65".into()),
             }),
         )
         .await
@@ -629,6 +631,11 @@ mod tests {
         assert_eq!(stored.username.as_deref(), Some("ann"));
         assert_eq!(stored.port, Some(2222));
         assert_eq!(stored.identity_file.as_deref(), Some("~/.ssh/id_ed25519"));
+        assert!(stored.remember_password);
+        assert_eq!(
+            stored.credential_id.as_deref(),
+            Some("73baf9d8-b681-4f2f-bf89-4ece1396fc65")
+        );
         assert!(created.is_ssh());
         // Never a dialable http(s) URL: an SSH profile's endpoint only exists
         // once a tunnel is up.

@@ -8,13 +8,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::askpass_client::{
     valid_answer, AskpassRequest, ADDRESS_ENV, ANSWER_TIMEOUT, FRAME_LIMIT, TOKEN_ENV,
@@ -216,11 +216,91 @@ pub struct CredentialCache {
     answers: Mutex<HashMap<String, Zeroizing<String>>>,
     ambiguous: Mutex<HashSet<String>>,
     declined: AtomicBool,
+    persistent_secret: Mutex<Option<String>>,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+struct StoredPasswords {
+    answers: HashMap<String, String>,
 }
 
 impl CredentialCache {
     pub fn clear(&self) {
         self.answers.lock().unwrap().clear();
+    }
+
+    pub fn set_persistent_secret(&self, name: Option<String>) {
+        *self.persistent_secret.lock().unwrap() = name;
+    }
+
+    fn persistent_secret(&self) -> Option<String> {
+        self.persistent_secret.lock().unwrap().clone()
+    }
+
+    fn read_stored_passwords(&self) -> StoredPasswords {
+        let Some(name) = self.persistent_secret() else {
+            return StoredPasswords::default();
+        };
+        let Ok(Some(raw)) = crate::keyring_store::get_secret(&name) else {
+            return StoredPasswords::default();
+        };
+        let raw = Zeroizing::new(raw);
+        serde_json::from_str(&raw).unwrap_or_default()
+    }
+
+    fn load_persistent_password(&self, prompt: &str) -> Option<Zeroizing<String>> {
+        let mut stored = self.read_stored_passwords();
+        let answer = stored.answers.remove(prompt).map(Zeroizing::new);
+        for value in stored.answers.values_mut() {
+            value.zeroize();
+        }
+        answer
+    }
+
+    fn remove_persistent_password(&self, prompt: &str) {
+        let Some(name) = self.persistent_secret() else {
+            return;
+        };
+        let mut stored = self.read_stored_passwords();
+        if let Some(mut removed) = stored.answers.remove(prompt) {
+            removed.zeroize();
+        }
+        if stored.answers.is_empty() {
+            let _ = crate::keyring_store::delete_secret(&name);
+            return;
+        }
+        if let Ok(serialized) = serde_json::to_string(&stored).map(Zeroizing::new) {
+            let _ = crate::keyring_store::set_secret(&name, &serialized);
+        }
+        for value in stored.answers.values_mut() {
+            value.zeroize();
+        }
+    }
+
+    pub fn persist_passwords(&self) -> Result<(), String> {
+        let Some(name) = self.persistent_secret() else {
+            return Ok(());
+        };
+        let mut stored = self.read_stored_passwords();
+        for (prompt, answer) in self.answers.lock().unwrap().iter() {
+            if prompt_kind(prompt) == Some(PromptKind::Password) {
+                stored
+                    .answers
+                    .insert(prompt.clone(), answer.as_str().to_string());
+            }
+        }
+        if stored.answers.is_empty() {
+            return Ok(());
+        }
+        let serialized = Zeroizing::new(
+            serde_json::to_string(&stored)
+                .map_err(|e| format!("SSH password serialization failed: {e}"))?,
+        );
+        let result = crate::keyring_store::set_secret(&name, &serialized);
+        for value in stored.answers.values_mut() {
+            value.zeroize();
+        }
+        result
     }
 
     pub fn redact(&self, text: &str) -> String {
@@ -381,6 +461,9 @@ impl ServerContext {
                 .unwrap()
                 .insert(prompt.to_string());
             self.credentials.answers.lock().unwrap().remove(prompt);
+            if kind == PromptKind::Password {
+                self.credentials.remove_persistent_password(prompt);
+            }
         }
         let cacheable = kind != PromptKind::HostKey
             && !self.credentials.ambiguous.lock().unwrap().contains(prompt);
@@ -394,6 +477,16 @@ impl ServerContext {
                 .cloned();
             if cached.is_some() {
                 return cached;
+            }
+            if kind == PromptKind::Password {
+                if let Some(saved) = self.credentials.load_persistent_password(prompt) {
+                    self.credentials
+                        .answers
+                        .lock()
+                        .unwrap()
+                        .insert(prompt.to_string(), saved.clone());
+                    return Some(saved);
+                }
             }
         }
         let answer = tokio::time::timeout(

@@ -83,6 +83,8 @@ export interface RemoteWorkspaceSshConfig {
   username?: string
   port?: number
   identityFile?: string
+  rememberPassword?: boolean
+  credentialId?: string
 }
 
 export interface RemoteWorkspaceConnection {

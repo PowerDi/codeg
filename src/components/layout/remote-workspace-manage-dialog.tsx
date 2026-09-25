@@ -20,10 +20,12 @@ import {
 import { Reorder, useDragControls } from "motion/react"
 import { useTranslations } from "next-intl"
 import {
+  clearSshFormCredentials,
   createRemoteWorkspaceConnection,
   deleteRemoteWorkspaceConnection,
   listRemoteWorkspaceConnections,
   reorderRemoteWorkspaceConnections,
+  subscribeSshConnectionProgress,
   updateRemoteWorkspaceConnection,
   testRemoteWorkspaceConnection,
 } from "@/lib/remote-workspace"
@@ -68,7 +70,7 @@ import {
   ResizablePanel,
   ResizablePanelGroup,
 } from "@/components/ui/resizable"
-import { cn } from "@/lib/utils"
+import { cn, randomUUID } from "@/lib/utils"
 
 const LEFT_MIN_WIDTH = 260
 const RIGHT_MIN_WIDTH = 380
@@ -168,6 +170,11 @@ export function RemoteWorkspaceManageDialog({
   const [deleting, setDeleting] = useState(false)
   const [testing, setTesting] = useState(false)
   const [testSucceeded, setTestSucceeded] = useState(false)
+  const [saveSucceeded, setSaveSucceeded] = useState(false)
+  const [sshLogs, setSshLogs] = useState<string[]>([])
+  const sshProgressTaskRef = useRef<string | null>(null)
+  const sshProgressUnsubscribeRef = useRef<(() => void) | null>(null)
+  const sshLogEndRef = useRef<HTMLDivElement | null>(null)
   const busy = saving || testing || deleting
   const [deleteTargetId, setDeleteTargetId] = useState<number | null>(null)
   const [reordering, setReordering] = useState(false)
@@ -175,6 +182,62 @@ export function RemoteWorkspaceManageDialog({
   const pendingOrderRef = useRef<number[] | null>(null)
   const panelContainerRef = useRef<HTMLDivElement | null>(null)
   const [panelContainerWidth, setPanelContainerWidth] = useState(0)
+
+  const stopSshProgress = useCallback(() => {
+    sshProgressUnsubscribeRef.current?.()
+    sshProgressUnsubscribeRef.current = null
+    sshProgressTaskRef.current = null
+  }, [])
+
+  const resetSshProgress = useCallback(() => {
+    stopSshProgress()
+    setSshLogs([])
+  }, [stopSshProgress])
+
+  const startSshProgress = useCallback(
+    async (taskId: string) => {
+      stopSshProgress()
+      sshProgressTaskRef.current = taskId
+      setSshLogs([t("sshConnecting")])
+      let unsubscribe: () => void
+      try {
+        unsubscribe = await subscribeSshConnectionProgress((event) => {
+          if (
+            event.task_id !== taskId ||
+            sshProgressTaskRef.current !== taskId
+          ) {
+            return
+          }
+          setSshLogs((current) => {
+            if (current[current.length - 1] === event.message) return current
+            return [...current, event.message].slice(-100)
+          })
+        })
+      } catch (err) {
+        console.error("[RemoteWorkspace] SSH progress unavailable:", err)
+        return
+      }
+      if (sshProgressTaskRef.current !== taskId) {
+        unsubscribe()
+        return
+      }
+      sshProgressUnsubscribeRef.current = unsubscribe
+    },
+    [stopSshProgress, t]
+  )
+
+  useEffect(
+    () => () => {
+      stopSshProgress()
+      void clearSshFormCredentials().catch(() => {})
+    },
+    [stopSshProgress]
+  )
+
+  useEffect(() => {
+    const container = sshLogEndRef.current?.parentElement
+    if (container) container.scrollTop = container.scrollHeight
+  }, [sshLogs])
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -273,25 +336,56 @@ export function RemoteWorkspaceManageDialog({
   )
   const leftMaxSize = Math.max(leftMinSize, 100 - rightMinSize)
 
-  const updateDraft = useCallback((patch: Partial<Draft>) => {
-    setTestSucceeded(false)
-    setFormError(null)
-    setTestSucceeded(false)
-    setDraft((prev) => ({ ...prev, ...patch }))
-  }, [])
+  const updateDraft = useCallback(
+    (patch: Partial<Draft>) => {
+      resetSshProgress()
+      if (
+        "mode" in patch ||
+        "sshHost" in patch ||
+        "sshUsername" in patch ||
+        "sshPort" in patch ||
+        "sshIdentityFile" in patch ||
+        "sshRememberPassword" in patch
+      ) {
+        void clearSshFormCredentials().catch(() => {})
+      }
+      setTestSucceeded(false)
+      setSaveSucceeded(false)
+      setFormError(null)
+      setDraft((prev) => {
+        const locatorChanged =
+          "sshHost" in patch ||
+          "sshUsername" in patch ||
+          "sshPort" in patch ||
+          "sshIdentityFile" in patch
+        return {
+          ...prev,
+          ...patch,
+          ...(locatorChanged && prev.sshRememberPassword
+            ? { sshCredentialId: randomUUID() }
+            : {}),
+        }
+      })
+    },
+    [resetSshProgress]
+  )
 
   const startNew = useCallback(() => {
+    resetSshProgress()
+    void clearSshFormCredentials().catch(() => {})
     setSelectedId(null)
     setFormError(null)
     setDraft(EMPTY_DRAFT)
     setTestSucceeded(false)
+    setSaveSucceeded(false)
     setHeadersOpen(false)
-  }, [])
+  }, [resetSshProgress])
 
   const updateHeader = useCallback(
     (index: number, patch: Partial<RemoteWorkspaceHeader>) => {
       setFormError(null)
       setTestSucceeded(false)
+      setSaveSucceeded(false)
       setDraft((prev) => ({
         ...prev,
         headers: prev.headers.map((header, position) =>
@@ -305,6 +399,7 @@ export function RemoteWorkspaceManageDialog({
   const addHeader = useCallback(() => {
     setFormError(null)
     setTestSucceeded(false)
+    setSaveSucceeded(false)
     setDraft((prev) => ({
       ...prev,
       headers: [...prev.headers, { name: "", value: "" }],
@@ -314,6 +409,7 @@ export function RemoteWorkspaceManageDialog({
   const removeHeader = useCallback((index: number) => {
     setFormError(null)
     setTestSucceeded(false)
+    setSaveSucceeded(false)
     setDraft((prev) => ({
       ...prev,
       headers: prev.headers.filter((_, position) => position !== index),
@@ -359,16 +455,26 @@ export function RemoteWorkspaceManageDialog({
     }
     setTesting(true)
     setTestSucceeded(false)
+    setSaveSucceeded(false)
     setFormError(null)
+    const taskId = draft.mode === "ssh" ? randomUUID() : undefined
     try {
-      await testRemoteWorkspaceConnection(result.input)
+      if (taskId) await startSshProgress(taskId)
+      if (taskId) {
+        await testRemoteWorkspaceConnection(result.input, taskId)
+      } else {
+        await testRemoteWorkspaceConnection(result.input)
+      }
       setTestSucceeded(true)
     } catch (err) {
-      setFormError(`${t("testFailed")}: ${toErrorMessage(err)}`)
+      const message = `${t("testFailed")}: ${toErrorMessage(err)}`
+      setFormError(message)
+      if (taskId) setSshLogs((current) => [...current, `ERROR: ${message}`])
     } finally {
+      stopSshProgress()
       setTesting(false)
     }
-  }, [draft, t])
+  }, [draft, startSshProgress, stopSshProgress, t])
 
   const handleSave = useCallback(async () => {
     const result = remoteWorkspaceInput(draft)
@@ -378,13 +484,20 @@ export function RemoteWorkspaceManageDialog({
     }
     setSaving(true)
     setTestSucceeded(false)
+    setSaveSucceeded(false)
     setFormError(null)
+    const taskId = draft.mode === "ssh" ? randomUUID() : undefined
     try {
+      if (taskId) await startSshProgress(taskId)
       const input = result.input
       const saved =
         draft.id === null
-          ? await createRemoteWorkspaceConnection(input)
-          : await updateRemoteWorkspaceConnection(draft.id, input)
+          ? taskId
+            ? await createRemoteWorkspaceConnection(input, taskId)
+            : await createRemoteWorkspaceConnection(input)
+          : taskId
+            ? await updateRemoteWorkspaceConnection(draft.id, input, taskId)
+            : await updateRemoteWorkspaceConnection(draft.id, input)
       setConnections((prev) => {
         const exists = prev.some((item) => item.id === saved.id)
         if (exists) {
@@ -394,13 +507,17 @@ export function RemoteWorkspaceManageDialog({
       })
       setSelectedId(saved.id)
       setDraft(remoteWorkspaceDraft(saved))
+      setSaveSucceeded(true)
       onChanged()
     } catch (err) {
-      setFormError(`${t("saveFailed")}: ${toErrorMessage(err)}`)
+      const message = `${t("saveFailed")}: ${toErrorMessage(err)}`
+      setFormError(message)
+      if (taskId) setSshLogs((current) => [...current, `ERROR: ${message}`])
     } finally {
+      stopSshProgress()
       setSaving(false)
     }
-  }, [draft, onChanged, t])
+  }, [draft, onChanged, startSshProgress, stopSshProgress, t])
 
   const handleDelete = useCallback(async () => {
     if (deleteTargetId === null) return
@@ -431,7 +548,12 @@ export function RemoteWorkspaceManageDialog({
       <Dialog
         open={open}
         onOpenChange={(next) => {
-          if (!busy) onOpenChange(next)
+          if (busy) return
+          if (!next) {
+            resetSshProgress()
+            void clearSshFormCredentials().catch(() => {})
+          }
+          onOpenChange(next)
         }}
       >
         <DialogContent className="flex h-[min(47.5rem,calc(100vh-4rem))] max-w-[min(61.25rem,calc(100vw-2rem))] flex-col gap-0 overflow-hidden p-0 sm:max-w-5xl">
@@ -504,7 +626,13 @@ export function RemoteWorkspaceManageDialog({
                             selected={selectedId === connection.id}
                             disabled={dragDisabled}
                             onSelect={(id) => {
-                              if (!busy) setSelectedId(id)
+                              if (!busy) {
+                                resetSshProgress()
+                                void clearSshFormCredentials().catch(() => {})
+                                setTestSucceeded(false)
+                                setSaveSucceeded(false)
+                                setSelectedId(id)
+                              }
                             }}
                             onDragEnd={() => {
                               const order = pendingOrderRef.current
@@ -669,9 +797,35 @@ export function RemoteWorkspaceManageDialog({
                             }
                           />
                         </div>
-                        <p className="text-xs text-muted-foreground">
-                          {t("sshOptionalHint")}
-                        </p>
+                        <label className="flex items-start gap-2 text-sm">
+                          <input
+                            type="checkbox"
+                            className="mt-0.5"
+                            checked={draft.sshRememberPassword}
+                            onChange={(event) => {
+                              const checked = event.target.checked
+                              updateDraft({
+                                sshRememberPassword: checked,
+                                sshCredentialId: checked
+                                  ? draft.sshCredentialId || randomUUID()
+                                  : draft.sshCredentialId,
+                              })
+                            }}
+                          />
+                          <span>
+                            <span className="block text-xs font-medium">
+                              {t("sshRememberPassword")}
+                            </span>
+                            <span className="mt-0.5 block text-2xs text-muted-foreground">
+                              {t("sshRememberPasswordHint")}
+                            </span>
+                          </span>
+                        </label>
+                        {!draft.sshRememberPassword && (
+                          <p className="text-xs text-muted-foreground">
+                            {t("sshOptionalHint")}
+                          </p>
+                        )}
                       </div>
                     ) : (
                       <>
@@ -788,13 +942,35 @@ export function RemoteWorkspaceManageDialog({
                         {t("testSucceeded")}
                       </p>
                     )}
-                    {draft.mode === "ssh" && (saving || testing) && (
+                    {saveSucceeded && (
                       <p
                         role="status"
                         className="text-xs text-muted-foreground"
                       >
-                        {t("sshConnecting")}
+                        {t("saved")}
                       </p>
+                    )}
+                    {draft.mode === "ssh" && sshLogs.length > 0 && (
+                      <div
+                        role="log"
+                        aria-live="polite"
+                        aria-label={t("sshConnecting")}
+                        className="max-h-44 overflow-y-auto rounded-md border bg-muted/50 p-3 font-mono text-2xs leading-relaxed text-muted-foreground"
+                      >
+                        {sshLogs.map((line, index) => (
+                          <div
+                            key={`${index}-${line}`}
+                            className={
+                              line.startsWith("ERROR:")
+                                ? "text-destructive"
+                                : undefined
+                            }
+                          >
+                            {line}
+                          </div>
+                        ))}
+                        <div ref={sshLogEndRef} />
+                      </div>
                     )}
                   </fieldset>
 

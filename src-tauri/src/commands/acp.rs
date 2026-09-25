@@ -1536,7 +1536,7 @@ fn build_report(
                     "candidate",
                     dir,
                     if *has { DiagLevel::Ok } else { DiagLevel::Info },
-                    selected.then_some("← selected (first with a node binary)"),
+                    selected.then_some("← first candidate with a node binary; not necessarily active"),
                 )
             })
             .collect();

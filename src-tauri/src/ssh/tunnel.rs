@@ -17,7 +17,10 @@ use crate::app_error::AppCommandError;
 use crate::db::service::remote_workspace_connection_service;
 use crate::models::{RemoteWorkspaceConnectionInfo, RemoteWorkspaceSshConfig};
 use crate::ssh::askpass::{AskpassServer, CredentialCache, PromptBroker};
-use crate::ssh::bootstrap::{run_bootstrap_with_askpass, BootstrapOutcome};
+use crate::ssh::bootstrap::{
+    run_bootstrap_with_askpass, run_bootstrap_with_askpass_and_progress, BootstrapOutcome,
+    BootstrapProgress,
+};
 use crate::ssh::command::{ssh_command_with_askpass, SshInvocation};
 
 const TUNNEL_READY_TIMEOUT: Duration = Duration::from_secs(25);
@@ -29,6 +32,13 @@ const TUNNEL_READY_LINE: &str = "CODEG_TUNNEL_READY";
 // selected port. Never send a bearer token merely because that port is open.
 // Keep the parent's stdin pipe open; on disconnect, cat sees EOF and exits.
 const TUNNEL_COMMAND: &str = "sh -c 'printf \"CODEG_TUNNEL_READY\\n\"; cat >/dev/null'";
+
+fn ssh_password_secret_name(config: &RemoteWorkspaceSshConfig) -> Option<String> {
+    config
+        .credential_id
+        .as_ref()
+        .map(|id| format!("ssh-password:{id}"))
+}
 
 struct ActiveTunnel {
     local_port: u16,
@@ -130,10 +140,19 @@ struct ManagerState {
     closed_profiles: HashSet<i32>,
 }
 
+struct FormCredentialCache {
+    config: RemoteWorkspaceSshConfig,
+    credentials: Arc<CredentialCache>,
+}
+
 pub struct SshManager {
     // Never held across an await. Window destruction can cancel synchronously,
     // before a new window with the same label registers a different instance.
     state: StdMutex<ManagerState>,
+    // Test/save share answers only while the owning management dialog is open.
+    // The cache itself is never persisted; opted-in passwords are copied to
+    // the OS credential store only after a successful save/open.
+    form_credentials: StdMutex<HashMap<String, FormCredentialCache>>,
     pub(crate) prompts: Arc<PromptBroker>,
     health: reqwest::Client,
     cancelled: CancellationToken,
@@ -143,6 +162,7 @@ impl SshManager {
     pub fn new() -> Self {
         Self {
             state: StdMutex::new(ManagerState::default()),
+            form_credentials: StdMutex::new(HashMap::new()),
             prompts: Arc::new(PromptBroker::default()),
             cancelled: CancellationToken::new(),
             health: reqwest::Client::builder()
@@ -178,6 +198,11 @@ impl SshManager {
         owner_window: &str,
         credentials: Arc<CredentialCache>,
     ) -> Result<Option<AskpassServer>, AppCommandError> {
+        credentials.set_persistent_secret(if config.remember_password {
+            ssh_password_secret_name(config)
+        } else {
+            None
+        });
         // Non-GUI tests keep the existing fail-closed, batch-mode behavior.
         if !self.prompts.available() {
             return Ok(None);
@@ -275,7 +300,14 @@ impl SshManager {
                         .await?;
                     let result = async {
                         let outcome = run_bootstrap_with_askpass(config, askpass.as_ref()).await?;
-                        self.open_tunnel(config, &outcome, askpass.as_ref()).await
+                        let tunnel = self.open_tunnel(config, &outcome, askpass.as_ref()).await?;
+                        session.credentials.persist_passwords().map_err(|detail| {
+                            AppCommandError::task_execution_failed(
+                                "Could not save the SSH password to the system credential store",
+                            )
+                            .with_detail(detail)
+                        })?;
+                        Ok(tunnel)
                     }
                     .await;
                     if result.is_err() {
@@ -305,16 +337,95 @@ impl SshManager {
         config: &RemoteWorkspaceSshConfig,
         owner_window: &str,
     ) -> Result<(), AppCommandError> {
+        self.test_config_for_window_with_progress(config, owner_window, None, false)
+            .await
+    }
+
+    fn form_credentials(
+        &self,
+        owner_window: &str,
+        config: &RemoteWorkspaceSshConfig,
+    ) -> Arc<CredentialCache> {
+        let mut caches = self.form_credentials.lock().unwrap();
+        if let Some(entry) = caches.get(owner_window) {
+            if &entry.config == config {
+                return entry.credentials.clone();
+            }
+        }
+        let credentials = Arc::new(CredentialCache::default());
+        caches.insert(
+            owner_window.to_string(),
+            FormCredentialCache {
+                config: config.clone(),
+                credentials: credentials.clone(),
+            },
+        );
+        credentials
+    }
+
+    pub fn clear_form_credentials(&self, owner_window: &str) {
+        if let Some(entry) = self.form_credentials.lock().unwrap().remove(owner_window) {
+            entry.credentials.clear();
+        }
+    }
+
+    pub fn delete_saved_password(&self, config: &RemoteWorkspaceSshConfig) -> Result<(), String> {
+        let Some(name) = ssh_password_secret_name(config) else {
+            return Ok(());
+        };
+        crate::keyring_store::delete_secret(&name)
+    }
+
+    pub async fn test_config_for_window_with_progress(
+        &self,
+        config: &RemoteWorkspaceSshConfig,
+        owner_window: &str,
+        progress: Option<BootstrapProgress>,
+        persist_passwords: bool,
+    ) -> Result<(), AppCommandError> {
         tokio::select! {
             biased;
             _ = self.cancelled.cancelled() => Err(AppCommandError::network("The desktop is shutting down")),
             result = async {
+                if let Some(report) = progress.as_ref() {
+                    report("Validating SSH configuration".to_string());
+                }
                 let config = crate::ssh::config::validate_ssh_config(config)?;
-                let askpass = self.askpass(&config, owner_window, Arc::new(CredentialCache::default())).await?;
-                let outcome = run_bootstrap_with_askpass(&config, askpass.as_ref()).await?;
-                let mut tunnel = self.open_tunnel(&config, &outcome, askpass.as_ref()).await?;
-                let _ = tunnel.child.kill().await;
-                Ok(())
+                if let Some(report) = progress.as_ref() {
+                    report(format!("Connecting to {}", config.host));
+                }
+                let credentials = self.form_credentials(owner_window, &config);
+                let askpass = self.askpass(&config, owner_window, credentials).await?;
+                let result = async {
+                    let outcome = run_bootstrap_with_askpass_and_progress(
+                        &config,
+                        askpass.as_ref(),
+                        progress.as_ref(),
+                    )
+                    .await?;
+                    if let Some(report) = progress.as_ref() {
+                        report("Opening encrypted SSH tunnel".to_string());
+                    }
+                    let mut tunnel = self.open_tunnel(&config, &outcome, askpass.as_ref()).await?;
+                    if let Some(report) = progress.as_ref() {
+                        report("SSH tunnel established; remote server is ready".to_string());
+                    }
+                    let _ = tunnel.child.kill().await;
+                    if persist_passwords {
+                        credentials.persist_passwords().map_err(|detail| {
+                            AppCommandError::task_execution_failed(
+                                "Could not save the SSH password to the system credential store",
+                            )
+                            .with_detail(detail)
+                        })?;
+                    }
+                    Ok(())
+                }
+                .await;
+                if askpass.as_ref().and_then(|auth| auth.failure()).is_some() {
+                    self.clear_form_credentials(owner_window);
+                }
+                result
             } => result,
         }
     }
@@ -452,6 +563,10 @@ impl SshManager {
     pub async fn shutdown_all(&self) {
         self.cancelled.cancel();
         self.prompts.shutdown();
+        let form_credentials = std::mem::take(&mut *self.form_credentials.lock().unwrap());
+        for entry in form_credentials.into_values() {
+            entry.credentials.clear();
+        }
         let sessions = {
             let mut state = self.state.lock().unwrap();
             state.closing = true;
@@ -542,6 +657,61 @@ async fn tunnel_port_open(port: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_password_key_is_scoped_to_the_profile_credential_id() {
+        let base = RemoteWorkspaceSshConfig {
+            host: "build-host".to_string(),
+            username: Some("coder".to_string()),
+            remember_password: true,
+            credential_id: Some("73baf9d8-b681-4f2f-bf89-4ece1396fc65".into()),
+            ..Default::default()
+        };
+        let renamed_target = RemoteWorkspaceSshConfig {
+            host: "other-host".to_string(),
+            ..base.clone()
+        };
+        assert_eq!(
+            ssh_password_secret_name(&base),
+            ssh_password_secret_name(&renamed_target)
+        );
+        assert_ne!(
+            ssh_password_secret_name(&base),
+            ssh_password_secret_name(&RemoteWorkspaceSshConfig {
+                credential_id: Some("015e9e37-d6a5-4f8e-8126-a35dc52b0791".into()),
+                ..base
+            })
+        );
+    }
+
+    #[test]
+    fn form_credentials_are_reused_only_for_the_same_window_and_config() {
+        let manager = SshManager::new();
+        let config = RemoteWorkspaceSshConfig {
+            host: "build-host".to_string(),
+            ..Default::default()
+        };
+        let first = manager.form_credentials("main", &config);
+        let same = manager.form_credentials("main", &config);
+        assert!(Arc::ptr_eq(&first, &same));
+
+        let changed = manager.form_credentials(
+            "main",
+            &RemoteWorkspaceSshConfig {
+                port: Some(2222),
+                ..config.clone()
+            },
+        );
+        assert!(!Arc::ptr_eq(&first, &changed));
+
+        let other_window = manager.form_credentials("settings", &config);
+        assert!(!Arc::ptr_eq(&changed, &other_window));
+        manager.clear_form_credentials("main");
+        assert!(!Arc::ptr_eq(
+            &changed,
+            &manager.form_credentials("main", &config)
+        ));
+    }
 
     #[tokio::test]
     async fn forwarding_needs_an_ack_not_just_an_open_port() {

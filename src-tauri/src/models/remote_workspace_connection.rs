@@ -2,6 +2,10 @@ use chrono::{DateTime, Utc};
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteWorkspaceHeader {
     #[serde(default)]
@@ -64,6 +68,12 @@ pub struct RemoteWorkspaceSshConfig {
     /// database.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_file: Option<String>,
+    /// The password itself lives in the OS credential store. This flag is the
+    /// only credential-related value persisted with the connection profile.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub remember_password: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

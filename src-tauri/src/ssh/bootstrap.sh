@@ -116,6 +116,24 @@ HOME_DIR="${HOME:-}"
 [ -n "$HOME_DIR" ] && [ -d "$HOME_DIR" ] ||
   emit_error no_home "The remote account has no usable HOME directory."
 
+# This script runs under non-login `sh -s`, whose PATH often sees only the
+# system Node.js. Import the user's interactive login PATH before starting the
+# server so nvm/fnm/asdf-managed node, npm and npx remain visible to agents.
+# Bound shell startup so a broken rc file cannot wedge the whole bootstrap.
+LOGIN_SHELL="${SHELL:-}"
+if [ -n "$LOGIN_SHELL" ] && [ -x "$LOGIN_SHELL" ] && command -v timeout >/dev/null 2>&1; then
+  LOGIN_PATH="$(
+    timeout 5 "$LOGIN_SHELL" -lic \
+      'printf "CODEG_LOGIN_PATH=%s\n" "$PATH"' </dev/null 2>/dev/null |
+      sed -n 's/^CODEG_LOGIN_PATH=//p' | tail -n 1
+  )"
+  if [ -n "$LOGIN_PATH" ]; then
+    PATH="${LOGIN_PATH}:${PATH}"
+    export PATH
+    log "imported PATH from ${LOGIN_SHELL} login shell"
+  fi
+fi
+
 # ── Layout ────────────────────────────────────────────────────────────────
 #
 # A single fixed root under the user's home. `data/` deliberately does NOT
@@ -125,7 +143,7 @@ HOME_DIR="${HOME:-}"
 
 ROOT="${HOME_DIR}/${CODEG_REMOTE_ROOT_NAME}"
 VERSIONS_DIR="${ROOT}/versions"
-INSTALL_DIR="${VERSIONS_DIR}/${CODEG_REMOTE_VERSION}"
+INSTALL_DIR="${ROOT}/runtime"
 DATA_DIR="${ROOT}/data"
 RUN_DIR="${ROOT}/run"
 LOG_DIR="${ROOT}/logs"
@@ -209,6 +227,7 @@ pid_is_our_server() {
   # process, so compare on the path with the suffix removed.
   _exe="${_exe% (deleted)}"
   case "$_exe" in
+  "${INSTALL_DIR}/codeg-server") return 0 ;;
   "${VERSIONS_DIR}/"*"/codeg-server") return 0 ;;
   *) return 1 ;;
   esac
@@ -294,6 +313,22 @@ rm -f "$STATE_FILE" 2>/dev/null || true
 
 # ── Install ───────────────────────────────────────────────────────────────
 
+# Pre-runtime-layout builds installed into `versions/<desktop-version>/`.
+# Adopt the directory named by the old state file when possible; after a server
+# self-update its name may be stale, but its contents are exactly the bundle we
+# must keep. A profile with no state falls back to the current seed version.
+LEGACY_INSTALL_DIR=""
+if [ -n "$RUNNING_VERSION" ] && [ -d "${VERSIONS_DIR}/${RUNNING_VERSION}" ] && [ ! -L "${VERSIONS_DIR}/${RUNNING_VERSION}" ]; then
+  LEGACY_INSTALL_DIR="${VERSIONS_DIR}/${RUNNING_VERSION}"
+elif [ -d "${VERSIONS_DIR}/${CODEG_REMOTE_VERSION}" ] && [ ! -L "${VERSIONS_DIR}/${CODEG_REMOTE_VERSION}" ]; then
+  LEGACY_INSTALL_DIR="${VERSIONS_DIR}/${CODEG_REMOTE_VERSION}"
+fi
+if [ ! -e "$INSTALL_DIR" ] && [ -n "$LEGACY_INSTALL_DIR" ]; then
+  mv "$LEGACY_INSTALL_DIR" "$INSTALL_DIR" ||
+    emit_error install_failed "Could not migrate the existing codeg SSH runtime."
+  log "migrated legacy runtime to ${INSTALL_DIR}"
+fi
+
 SERVER_BIN="${INSTALL_DIR}/codeg-server"
 MCP_BIN="${INSTALL_DIR}/codeg-mcp"
 WEB_DIR="${INSTALL_DIR}/web"
@@ -343,7 +378,7 @@ install_release() {
   done
 
   # Stage into a scratch directory and move into place, so a failure never
-  # leaves a half-populated version directory that later runs would trust.
+  # leaves a half-populated runtime directory that later runs would trust.
   staged="${TMP_DIR}/staged"
   mkdir -p "$staged" || return 1
   cp "${TMP_DIR}/${artifact}/codeg-server" "${staged}/codeg-server" || return 1
@@ -354,7 +389,7 @@ install_release() {
   fi
 
   rm -rf "$INSTALL_DIR"
-  mkdir -p "$VERSIONS_DIR" || return 1
+  mkdir -p "$ROOT" || return 1
   mv "$staged" "$INSTALL_DIR" ||
     emit_error install_failed "The verified release could not be moved into place."
   rm -rf "$TMP_DIR"
@@ -363,7 +398,7 @@ install_release() {
 
 INSTALLED_FRESH=false
 if [ -x "$SERVER_BIN" ] && [ -x "$MCP_BIN" ]; then
-  log "version ${CODEG_REMOTE_VERSION} already installed"
+  log "using existing codeg SSH runtime"
 else
   install_release || emit_error install_failed "The codeg-server install did not complete."
   INSTALLED_FRESH=true

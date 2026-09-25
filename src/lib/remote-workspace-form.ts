@@ -15,6 +15,8 @@ export interface RemoteWorkspaceDraft {
   sshUsername: string
   sshPort: string
   sshIdentityFile: string
+  sshRememberPassword: boolean
+  sshCredentialId: string
 }
 
 export const EMPTY_REMOTE_WORKSPACE_DRAFT: RemoteWorkspaceDraft = {
@@ -28,6 +30,8 @@ export const EMPTY_REMOTE_WORKSPACE_DRAFT: RemoteWorkspaceDraft = {
   sshUsername: "",
   sshPort: "",
   sshIdentityFile: "",
+  sshRememberPassword: false,
+  sshCredentialId: "",
 }
 
 export function remoteWorkspaceDraft(
@@ -45,6 +49,8 @@ export function remoteWorkspaceDraft(
     sshUsername: connection.ssh?.username ?? "",
     sshPort: connection.ssh?.port?.toString() ?? "",
     sshIdentityFile: connection.ssh?.identityFile ?? "",
+    sshRememberPassword: connection.ssh?.rememberPassword ?? false,
+    sshCredentialId: connection.ssh?.credentialId ?? "",
   }
 }
 
@@ -134,6 +140,10 @@ export function remoteWorkspaceInput(
         ...(username ? { username } : {}),
         ...(port ? { port: Number(port) } : {}),
         ...(identityFile ? { identityFile } : {}),
+        ...(draft.sshRememberPassword ? { rememberPassword: true } : {}),
+        ...(draft.sshRememberPassword && draft.sshCredentialId
+          ? { credentialId: draft.sshCredentialId }
+          : {}),
       },
     },
   }

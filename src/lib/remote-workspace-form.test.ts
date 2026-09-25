@@ -56,6 +56,20 @@ describe("SSH workspace form contract", () => {
     })
   })
 
+  it("persists only the remember-password preference, never a password", () => {
+    const result = remoteWorkspaceInput({
+      ...sshDraft,
+      sshRememberPassword: true,
+      sshCredentialId: "73baf9d8-b681-4f2f-bf89-4ece1396fc65",
+    })
+    expect(result.input?.ssh).toEqual({
+      host: "build-alias",
+      rememberPassword: true,
+      credentialId: "73baf9d8-b681-4f2f-bf89-4ece1396fc65",
+    })
+    expect(JSON.stringify(result.input)).not.toContain('password":')
+  })
+
   it.each(["0", "65536", "-1", "22.5", "1e3", "+22", "NaN"])(
     "rejects invalid port %s",
     (sshPort) => {
@@ -102,6 +116,7 @@ describe("SSH workspace form contract", () => {
     expect(draft.token).toBe("")
     expect(draft.baseUrl).toBe("")
     expect(draft.headers).toEqual([])
+    expect(draft.sshRememberPassword).toBe(false)
   })
 
   it("preserves the legacy HTTP payload and clears SSH on a mode switch", () => {

@@ -157,11 +157,26 @@ fn validate_identity_file(raw: Option<&str>) -> Result<Option<String>, AppComman
 pub fn validate_ssh_config(
     input: &RemoteWorkspaceSshConfig,
 ) -> Result<RemoteWorkspaceSshConfig, AppCommandError> {
+    let credential_id = if input.remember_password {
+        let raw = input
+            .credential_id
+            .as_deref()
+            .ok_or_else(|| AppCommandError::invalid_input("SSH credential id is required"))?;
+        Some(
+            uuid::Uuid::parse_str(raw.trim())
+                .map_err(|_| AppCommandError::invalid_input("SSH credential id is invalid"))?
+                .to_string(),
+        )
+    } else {
+        None
+    };
     Ok(RemoteWorkspaceSshConfig {
         host: validate_host(&input.host)?,
         username: validate_username(input.username.as_deref())?,
         port: validate_port(input.port)?,
         identity_file: validate_identity_file(input.identity_file.as_deref())?,
+        remember_password: input.remember_password,
+        credential_id,
     })
 }
 
@@ -200,11 +215,27 @@ mod tests {
             username: Some("  ann  ".into()),
             identity_file: Some("  ~/.ssh/id_ed25519  ".into()),
             port: Some(2222),
+            remember_password: true,
+            credential_id: Some("73baf9d8-b681-4f2f-bf89-4ece1396fc65".into()),
         })
         .unwrap();
         assert_eq!(actual.host, "build-box");
         assert_eq!(actual.username.as_deref(), Some("ann"));
         assert_eq!(actual.identity_file.as_deref(), Some("~/.ssh/id_ed25519"));
+        assert!(actual.remember_password);
+    }
+
+    #[test]
+    fn remembered_password_requires_a_uuid_and_disabled_profiles_drop_it() {
+        let mut remembered = cfg("build-box");
+        remembered.remember_password = true;
+        assert!(validate_ssh_config(&remembered).is_err());
+        remembered.credential_id = Some("not-a-uuid".into());
+        assert!(validate_ssh_config(&remembered).is_err());
+
+        let mut disabled = cfg("build-box");
+        disabled.credential_id = Some("73baf9d8-b681-4f2f-bf89-4ece1396fc65".into());
+        assert_eq!(validate_ssh_config(&disabled).unwrap().credential_id, None);
     }
 
     /// The whole point of the module. Each of these is a string that OpenSSH
@@ -324,6 +355,8 @@ mod tests {
             username: Some("   ".into()),
             identity_file: Some("".into()),
             port: None,
+            remember_password: false,
+            credential_id: None,
         })
         .unwrap();
         assert_eq!(actual.username, None);

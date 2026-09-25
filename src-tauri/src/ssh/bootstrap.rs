@@ -12,10 +12,11 @@
 //! the sentinel is what makes this robust against that.
 
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 
 use crate::app_error::AppCommandError;
 use crate::models::RemoteWorkspaceSshConfig;
@@ -29,6 +30,8 @@ pub const BOOTSTRAP_SCRIPT: &str = include_str!("bootstrap.sh");
 /// Sentinel prefix for the script's one machine-readable line. MUST match
 /// `SENTINEL` in `bootstrap.sh`.
 const RESULT_SENTINEL: &str = "CODEG_BOOTSTRAP_RESULT ";
+
+pub type BootstrapProgress = Arc<dyn Fn(String) + Send + Sync>;
 
 /// Fixed upstream release source. Not configurable, and deliberately not
 /// reachable from the frontend: a settable download base would turn "add a
@@ -250,6 +253,14 @@ pub async fn run_bootstrap_with_askpass(
     config: &RemoteWorkspaceSshConfig,
     askpass: Option<&crate::ssh::askpass::AskpassServer>,
 ) -> Result<BootstrapOutcome, AppCommandError> {
+    run_bootstrap_with_askpass_and_progress(config, askpass, None).await
+}
+
+pub async fn run_bootstrap_with_askpass_and_progress(
+    config: &RemoteWorkspaceSshConfig,
+    askpass: Option<&crate::ssh::askpass::AskpassServer>,
+    progress: Option<&BootstrapProgress>,
+) -> Result<BootstrapOutcome, AppCommandError> {
     // `sh -s` reads the program from stdin. The remote argv therefore carries no
     // user data and no script text at all.
     let mut command = ssh_command_with_askpass(config, SshInvocation::Exec, Some("sh -s"), askpass);
@@ -261,7 +272,13 @@ pub async fn run_bootstrap_with_askpass(
         .kill_on_drop(true);
 
     let payload = bootstrap_payload(requested_version());
-    let output = bounded_ssh_output(command, payload.as_bytes(), BOOTSTRAP_TIMEOUT).await;
+    let output = bounded_ssh_output(
+        command,
+        payload.as_bytes(),
+        BOOTSTRAP_TIMEOUT,
+        progress.cloned(),
+    )
+    .await;
     if let Some(error) = askpass.and_then(|auth| auth.failure()) {
         return Err(error);
     }
@@ -291,14 +308,6 @@ pub async fn run_bootstrap_with_askpass(
             )))
         }
     })?;
-    if outcome.version != requested_version() {
-        return Err(AppCommandError::configuration_invalid(
-            "A different codeg-server version is already running on this host",
-        ).with_detail(format!(
-            "This desktop requires version {}. The remote instance was left running; stop it after its agents finish, then reconnect.",
-            requested_version(),
-        )));
-    }
     Ok(outcome)
 }
 
@@ -318,12 +327,50 @@ async fn read_bounded(reader: impl AsyncRead + Unpin) -> std::io::Result<Vec<u8>
     Ok(bytes)
 }
 
+fn bootstrap_progress_message(line: &[u8]) -> Option<String> {
+    let line = String::from_utf8_lossy(line);
+    let message = line.trim().strip_prefix("[codeg-bootstrap] ")?.trim();
+    if message.is_empty() {
+        return None;
+    }
+    Some(crate::ssh::redact::truncate_for_detail(&redact_secrets(
+        message,
+    )))
+}
+
+async fn read_bounded_with_progress(
+    reader: impl AsyncRead + Unpin,
+    progress: Option<BootstrapProgress>,
+) -> std::io::Result<Vec<u8>> {
+    let mut reader = BufReader::new(reader);
+    let mut bytes = Vec::new();
+    loop {
+        let start = bytes.len();
+        let read = reader.read_until(b'\n', &mut bytes).await?;
+        if read == 0 {
+            break;
+        }
+        if bytes.len() as u64 > OUTPUT_LIMIT {
+            return Err(std::io::Error::other(
+                "SSH output exceeded the 256 KiB safety limit",
+            ));
+        }
+        if let (Some(report), Some(message)) =
+            (progress.as_ref(), bootstrap_progress_message(&bytes[start..]))
+        {
+            report(message);
+        }
+    }
+    Ok(bytes)
+}
+
 /// Read both pipes while writing stdin. The deadline covers *all* of it,
 /// including a blocked stdin write; cancellation drops the owned SSH child.
 async fn bounded_ssh_output(
     mut command: tokio::process::Command,
     payload: &[u8],
     deadline: Duration,
+    progress: Option<BootstrapProgress>,
 ) -> Result<std::process::Output, AppCommandError> {
     command
         .stdin(Stdio::piped())
@@ -355,7 +402,7 @@ async fn bounded_ssh_output(
             child.wait(),
             write,
             read_bounded(stdout),
-            read_bounded(stderr)
+            read_bounded_with_progress(stderr, progress)
         )?;
         Ok::<_, std::io::Error>(std::process::Output {
             status,
@@ -402,7 +449,7 @@ mod tests {
         let mut command = crate::process::tokio_command("sh");
         command.args(["-c", "exec sleep 30"]);
         let payload = vec![b'x'; 1024 * 1024];
-        let err = bounded_ssh_output(command, &payload, Duration::from_millis(100))
+        let err = bounded_ssh_output(command, &payload, Duration::from_millis(100), None)
             .await
             .unwrap_err();
         assert!(err.message.contains("timed out"));
@@ -413,7 +460,7 @@ mod tests {
     async fn excessive_remote_output_is_bounded() {
         let mut command = crate::process::tokio_command("sh");
         command.args(["-c", "head -c 300000 /dev/zero"]);
-        let err = bounded_ssh_output(command, &[], Duration::from_secs(3))
+        let err = bounded_ssh_output(command, &[], Duration::from_secs(3), None)
             .await
             .unwrap_err();
         assert!(err.detail.unwrap().contains("safety limit"));
@@ -428,6 +475,31 @@ mod tests {
             reused: false,
         };
         assert!(!format!("{outcome:?}").contains("secret-value"));
+    }
+
+    #[test]
+    fn only_controlled_bootstrap_lines_become_progress() {
+        assert_eq!(
+            bootstrap_progress_message(b"[codeg-bootstrap] checksum verified\n"),
+            Some("checksum verified".to_string())
+        );
+        assert_eq!(bootstrap_progress_message(b"OpenSSH debug output\n"), None);
+        assert_eq!(
+            bootstrap_progress_message(b"[codeg-bootstrap] [server] token: secret-value\n"),
+            Some("[server] token: [redacted]".to_string())
+        );
+    }
+
+    #[test]
+    fn bootstrap_imports_login_path_before_starting_the_server() {
+        let import = BOOTSTRAP_SCRIPT
+            .find("CODEG_LOGIN_PATH")
+            .expect("login PATH import is present");
+        let start = BOOTSTRAP_SCRIPT
+            .find("nohup \"$SERVER_BIN\"")
+            .expect("server launch is present");
+        assert!(import < start, "PATH must be imported before server launch");
+        assert!(BOOTSTRAP_SCRIPT.contains("timeout 5 \"$LOGIN_SHELL\" -lic"));
     }
 
     #[test]
@@ -637,8 +709,38 @@ mod tests {
             "ownership must be established from the process's actual executable"
         );
         assert!(
+            BOOTSTRAP_SCRIPT.contains("\"${INSTALL_DIR}/codeg-server\"")
+                && BOOTSTRAP_SCRIPT.contains("\"${VERSIONS_DIR}/\"*\"/codeg-server\""),
+            "both the stable runtime and legacy version directories must be recognized"
+        );
+    }
+
+    #[test]
+    fn runtime_path_is_stable_and_legacy_layout_is_migrated() {
+        assert!(BOOTSTRAP_SCRIPT.contains("INSTALL_DIR=\"${ROOT}/runtime\""));
+        assert!(BOOTSTRAP_SCRIPT.contains("LEGACY_INSTALL_DIR="));
+        assert!(BOOTSTRAP_SCRIPT.contains("mv \"$LEGACY_INSTALL_DIR\" \"$INSTALL_DIR\""));
+        assert!(
+            !BOOTSTRAP_SCRIPT.contains("INSTALL_DIR=\"${VERSIONS_DIR}/${CODEG_REMOTE_VERSION}\""),
+            "the running path must not depend on the desktop version"
+        );
+    }
+
+    #[test]
+    fn bootstrap_accepts_a_remote_version_that_differs_from_the_seed() {
+        let outcome = parse_reply(
+            "CODEG_BOOTSTRAP_RESULT {\"status\":\"ok\",\"port\":42000,\"token\":\"t\",\
+             \"version\":\"9.9.9\",\"reused\":true}",
+        )
+        .unwrap();
+        assert_eq!(outcome.version, "9.9.9");
+    }
+
+    #[test]
+    fn legacy_process_path_remains_accepted_during_migration() {
+        assert!(
             BOOTSTRAP_SCRIPT.contains("\"${VERSIONS_DIR}/\"*\"/codeg-server\""),
-            "the executable must be matched against our own install root"
+            "a still-running pre-migration server must remain recognizable"
         );
     }
 

@@ -447,6 +447,8 @@ mod tests {
             username: Some("ann".into()),
             port: Some(2222),
             identity_file: Some(r"C:\Users\Ann Smith\.ssh\id_ed25519".into()),
+            remember_password: false,
+            credential_id: None,
         };
         let args = strings(&build_ssh_args(&config, SshInvocation::Exec, None));
 

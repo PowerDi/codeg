@@ -5,21 +5,25 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 import type { RemoteWorkspaceConnection } from "@/lib/types"
 
 const mocks = vi.hoisted(() => ({
+  clearSshFormCredentials: vi.fn(),
   listRemoteWorkspaceConnections: vi.fn(),
   createRemoteWorkspaceConnection: vi.fn(),
   updateRemoteWorkspaceConnection: vi.fn(),
   deleteRemoteWorkspaceConnection: vi.fn(),
   reorderRemoteWorkspaceConnections: vi.fn(),
   testRemoteWorkspaceConnection: vi.fn(),
+  subscribeSshConnectionProgress: vi.fn(),
 }))
 
 vi.mock("@/lib/remote-workspace", () => ({
+  clearSshFormCredentials: mocks.clearSshFormCredentials,
   listRemoteWorkspaceConnections: mocks.listRemoteWorkspaceConnections,
   createRemoteWorkspaceConnection: mocks.createRemoteWorkspaceConnection,
   updateRemoteWorkspaceConnection: mocks.updateRemoteWorkspaceConnection,
   deleteRemoteWorkspaceConnection: mocks.deleteRemoteWorkspaceConnection,
   reorderRemoteWorkspaceConnections: mocks.reorderRemoteWorkspaceConnections,
   testRemoteWorkspaceConnection: mocks.testRemoteWorkspaceConnection,
+  subscribeSshConnectionProgress: mocks.subscribeSshConnectionProgress,
 }))
 
 import { RemoteWorkspaceManageDialog } from "./remote-workspace-manage-dialog"
@@ -54,6 +58,11 @@ async function mount(connections: RemoteWorkspaceConnection[]) {
   )
   await screen.findByDisplayValue(connections[0].name)
 }
+
+beforeEach(() => {
+  mocks.clearSshFormCredentials.mockResolvedValue(undefined)
+  mocks.subscribeSshConnectionProgress.mockResolvedValue(vi.fn())
+})
 
 describe("RemoteWorkspaceManageDialog custom headers", () => {
   beforeEach(() => {
@@ -145,7 +154,11 @@ describe("RemoteWorkspaceManageDialog SSH profiles", () => {
       base_url: "ssh://build-host",
       token: "",
       headers: [],
-      ssh: { host: "build-host" },
+      ssh: {
+        host: "build-host",
+        rememberPassword: true,
+        credentialId: "73baf9d8-b681-4f2f-bf89-4ece1396fc65",
+      },
     })
     mocks.updateRemoteWorkspaceConnection.mockResolvedValue(saved)
     await mount([
@@ -157,16 +170,29 @@ describe("RemoteWorkspaceManageDialog SSH profiles", () => {
     fireEvent.change(screen.getByLabelText("SSH host or config alias"), {
       target: { value: "build-host" },
     })
+    await userEvent.click(
+      screen.getByRole("checkbox", { name: /Remember SSH password/ })
+    )
     await userEvent.click(screen.getByRole("button", { name: "Save" }))
     await waitFor(() =>
-      expect(mocks.updateRemoteWorkspaceConnection).toHaveBeenCalledWith(1, {
-        name: "prod-box",
-        baseUrl: "",
-        token: "",
-        headers: [],
-        ssh: { host: "build-host" },
-      })
+      expect(mocks.updateRemoteWorkspaceConnection).toHaveBeenCalledWith(
+        1,
+        {
+          name: "prod-box",
+          baseUrl: "",
+          token: "",
+          headers: [],
+          ssh: {
+            host: "build-host",
+            rememberPassword: true,
+            credentialId: expect.any(String),
+          },
+        },
+        expect.any(String)
+      )
     )
+    expect(screen.getByText("Remote connection saved.")).toBeVisible()
+    expect(screen.getByText(/First-time installation may take/)).toBeVisible()
   })
 
   it("rejects invalid ports before starting an SSH operation", async () => {
@@ -208,6 +234,16 @@ describe("RemoteWorkspaceManageDialog SSH profiles", () => {
       screen.getByRole("button", { name: "New connection" })
     ).toBeDisabled()
     expect(screen.getByText(/First-time installation may take/)).toBeVisible()
+    const progressHandler =
+      mocks.subscribeSshConnectionProgress.mock.calls[0][0]
+    const taskId = mocks.testRemoteWorkspaceConnection.mock.calls[0][1]
+    act(() => {
+      progressHandler({
+        task_id: taskId,
+        message: "downloading codeg-server release",
+      })
+    })
+    expect(screen.getByText("downloading codeg-server release")).toBeVisible()
     await act(async () => finish())
     expect(await screen.findByText("Connection test succeeded.")).toBeVisible()
     expect(mocks.updateRemoteWorkspaceConnection).not.toHaveBeenCalled()

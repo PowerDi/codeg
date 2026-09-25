@@ -17,27 +17,50 @@ export async function getRemoteWorkspaceConnection(
 }
 
 export async function testRemoteWorkspaceConnection(
-  input: RemoteWorkspaceConnectionInput
+  input: RemoteWorkspaceConnectionInput,
+  taskId?: string
 ): Promise<void> {
-  return getShellTransport().call("test_remote_workspace_connection", { input })
+  return getShellTransport().call("test_remote_workspace_connection", {
+    input,
+    taskId: taskId ?? null,
+  })
 }
 
 export async function createRemoteWorkspaceConnection(
-  input: RemoteWorkspaceConnectionInput
+  input: RemoteWorkspaceConnectionInput,
+  taskId?: string
 ): Promise<RemoteWorkspaceConnection> {
   return getShellTransport().call("create_remote_workspace_connection", {
     input,
+    taskId: taskId ?? null,
   })
 }
 
 export async function updateRemoteWorkspaceConnection(
   id: number,
-  input: RemoteWorkspaceConnectionInput
+  input: RemoteWorkspaceConnectionInput,
+  taskId?: string
 ): Promise<RemoteWorkspaceConnection> {
   return getShellTransport().call("update_remote_workspace_connection", {
     id,
     input,
+    taskId: taskId ?? null,
   })
+}
+
+export interface SshConnectionProgressEvent {
+  task_id: string
+  message: string
+}
+
+export async function subscribeSshConnectionProgress(
+  handler: (event: SshConnectionProgressEvent) => void
+): Promise<() => void> {
+  return getShellTransport().subscribe("ssh-connection://progress", handler)
+}
+
+export async function clearSshFormCredentials(): Promise<void> {
+  return getShellTransport().call("clear_ssh_form_credentials")
 }
 
 export async function deleteRemoteWorkspaceConnection(

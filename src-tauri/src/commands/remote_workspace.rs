@@ -1,11 +1,11 @@
 #[cfg(feature = "tauri-runtime")]
 use reqwest::StatusCode;
 #[cfg(feature = "tauri-runtime")]
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 #[cfg(feature = "tauri-runtime")]
 use std::time::Duration;
 #[cfg(feature = "tauri-runtime")]
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 #[cfg(feature = "tauri-runtime")]
 use crate::app_error::AppCommandError;
@@ -24,6 +24,39 @@ use std::sync::Arc;
 
 #[cfg(feature = "tauri-runtime")]
 const REMOTE_HEALTH_TIMEOUT: Duration = Duration::from_secs(8);
+
+#[cfg(feature = "tauri-runtime")]
+const SSH_CONNECTION_PROGRESS_EVENT: &str = "ssh-connection://progress";
+
+#[cfg(feature = "tauri-runtime")]
+#[derive(Clone, Serialize)]
+struct SshConnectionProgressEvent {
+    task_id: String,
+    message: String,
+}
+
+#[cfg(feature = "tauri-runtime")]
+fn ssh_progress_reporter(
+    window: &tauri::WebviewWindow,
+    task_id: Option<String>,
+) -> Option<crate::ssh::bootstrap::BootstrapProgress> {
+    let task_id = task_id?.trim().to_string();
+    if task_id.is_empty() || task_id.len() > 128 {
+        return None;
+    }
+    let app = window.app_handle().clone();
+    let owner_window = window.label().to_string();
+    Some(Arc::new(move |message| {
+        let _ = app.emit_to(
+            &owner_window,
+            SSH_CONNECTION_PROGRESS_EVENT,
+            SshConnectionProgressEvent {
+                task_id: task_id.clone(),
+                message,
+            },
+        );
+    }))
+}
 
 #[cfg(feature = "tauri-runtime")]
 pub(crate) fn new_remote_window_instance_id() -> String {
@@ -121,9 +154,11 @@ pub async fn test_remote_workspace_connection(
     window: tauri::WebviewWindow,
     proxy: tauri::State<'_, Arc<RemoteProxyState>>,
     input: RemoteWorkspaceConnectionInput,
+    task_id: Option<String>,
 ) -> Result<(), AppCommandError> {
     proxy.ssh.prompts.bind_app(window.app_handle());
-    validate_connection(&proxy, &input, window.label()).await
+    let progress = ssh_progress_reporter(&window, task_id);
+    validate_connection(&proxy, &input, window.label(), progress, false).await
 }
 
 #[cfg(feature = "tauri-runtime")]
@@ -131,11 +166,31 @@ async fn validate_connection(
     proxy: &RemoteProxyState,
     input: &RemoteWorkspaceConnectionInput,
     owner_window: &str,
+    progress: Option<crate::ssh::bootstrap::BootstrapProgress>,
+    persist_password: bool,
 ) -> Result<(), AppCommandError> {
     match &input.ssh {
-        Some(config) => proxy.ssh.test_config_for_window(config, owner_window).await,
+        Some(config) => {
+            proxy
+                .ssh
+                .test_config_for_window_with_progress(
+                    config,
+                    owner_window,
+                    progress,
+                    persist_password,
+                )
+                .await
+        }
         None => validate_remote_health(&input.base_url, &input.token, &input.headers).await,
     }
+}
+
+#[cfg(feature = "tauri-runtime")]
+fn same_ssh_locator(a: &RemoteWorkspaceSshConfig, b: &RemoteWorkspaceSshConfig) -> bool {
+    a.host == b.host
+        && a.username == b.username
+        && a.port == b.port
+        && a.identity_file == b.identity_file
 }
 
 #[cfg(feature = "tauri-runtime")]
@@ -145,6 +200,7 @@ pub async fn create_remote_workspace_connection(
     db: tauri::State<'_, AppDatabase>,
     proxy: tauri::State<'_, Arc<RemoteProxyState>>,
     input: RemoteWorkspaceConnectionInput,
+    task_id: Option<String>,
 ) -> Result<RemoteWorkspaceConnectionInfo, AppCommandError> {
     if input.name.trim().is_empty() {
         return Err(AppCommandError::invalid_input(
@@ -152,7 +208,8 @@ pub async fn create_remote_workspace_connection(
         ));
     }
     proxy.ssh.prompts.bind_app(window.app_handle());
-    validate_connection(&proxy, &input, window.label()).await?;
+    let progress = ssh_progress_reporter(&window, task_id);
+    validate_connection(&proxy, &input, window.label(), progress, true).await?;
     remote_workspace_connection_service::create(
         &db.conn,
         &input.name,
@@ -172,6 +229,7 @@ pub async fn update_remote_workspace_connection(
     proxy: tauri::State<'_, Arc<RemoteProxyState>>,
     id: i32,
     input: RemoteWorkspaceConnectionInput,
+    task_id: Option<String>,
 ) -> Result<RemoteWorkspaceConnectionInfo, AppCommandError> {
     if input.name.trim().is_empty() {
         return Err(AppCommandError::invalid_input(
@@ -179,7 +237,22 @@ pub async fn update_remote_workspace_connection(
         ));
     }
     proxy.ssh.prompts.bind_app(window.app_handle());
-    validate_connection(&proxy, &input, window.label()).await?;
+    let progress = ssh_progress_reporter(&window, task_id);
+    let previous = remote_workspace_connection_service::get(&db.conn, id).await?;
+    if let (Some(old), Some(new)) = (
+        previous.as_ref().and_then(|connection| connection.ssh.as_ref()),
+        input.ssh.as_ref(),
+    ) {
+        if old.credential_id.is_some()
+            && old.credential_id == new.credential_id
+            && !same_ssh_locator(old, new)
+        {
+            return Err(AppCommandError::invalid_input(
+                "SSH credential id must change when the connection target changes",
+            ));
+        }
+    }
+    validate_connection(&proxy, &input, window.label(), progress, true).await?;
     let updated = remote_workspace_connection_service::update(
         &db.conn,
         id,
@@ -191,6 +264,21 @@ pub async fn update_remote_workspace_connection(
     )
     .await?;
     proxy.invalidate_connection(id).await;
+    if let Some(old) = previous.and_then(|connection| connection.ssh) {
+        let keep_same = input
+            .ssh
+            .as_ref()
+            .is_some_and(|new| {
+                new.remember_password
+                    && new.credential_id.is_some()
+                    && new.credential_id == old.credential_id
+            });
+        if old.remember_password && !keep_same {
+            if let Err(err) = proxy.ssh.delete_saved_password(&old) {
+                tracing::warn!("[SSH] failed to delete replaced saved password: {err}");
+            }
+        }
+    }
     Ok(updated)
 }
 
@@ -201,9 +289,17 @@ pub async fn delete_remote_workspace_connection(
     proxy: tauri::State<'_, Arc<RemoteProxyState>>,
     id: i32,
 ) -> Result<(), AppCommandError> {
+    let previous = remote_workspace_connection_service::get(&db.conn, id).await?;
     remote_workspace_connection_service::delete(&db.conn, id)
         .await
         .map_err(AppCommandError::db)?;
+    if let Some(config) = previous.and_then(|connection| connection.ssh) {
+        if config.remember_password {
+            if let Err(err) = proxy.ssh.delete_saved_password(&config) {
+                tracing::warn!("[SSH] failed to delete saved password: {err}");
+            }
+        }
+    }
     proxy.close_connection(id).await;
     Ok(())
 }
@@ -215,6 +311,15 @@ pub async fn reorder_remote_workspace_connections(
     ids: Vec<i32>,
 ) -> Result<(), AppCommandError> {
     remote_workspace_connection_service::reorder(&db.conn, ids).await
+}
+
+#[cfg(feature = "tauri-runtime")]
+#[tauri::command]
+pub fn clear_ssh_form_credentials(
+    window: tauri::WebviewWindow,
+    proxy: tauri::State<'_, Arc<RemoteProxyState>>,
+) {
+    proxy.ssh.clear_form_credentials(window.label());
 }
 
 #[cfg(feature = "tauri-runtime")]
