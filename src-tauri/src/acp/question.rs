@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sacp::schema::{
+use agent_client_protocol::schema::v1::{
     CreateElicitationRequest, CreateElicitationResponse, ElicitationAcceptAction, ElicitationAction,
     ElicitationContentValue, ElicitationMode, ElicitationPropertySchema, ElicitationScope,
     MultiSelectItems, StringPropertySchema,
@@ -798,7 +798,7 @@ fn multi_select_choices(items: &MultiSelectItems) -> Vec<ElicitationChoice> {
                 value: o.value.clone(),
             })
             .collect(),
-        MultiSelectItems::Untitled(u) => u
+        MultiSelectItems::String(u) => u
             .values
             .iter()
             .map(|v| ElicitationChoice {
@@ -1008,7 +1008,8 @@ impl ElicitationPeer {
 /// stamps it on every `request_user_input` field (question properties carry
 /// `isOther`/`isSecret`, companions carry `questionId` plus the role marker),
 /// and on nothing else — a generic MCP server's form has no `codex` namespace.
-/// The typed sacp property structs drop `_meta`, so this reads the raw JSON.
+/// The typed schema property structs carry no `_meta`, so this reads the raw
+/// JSON.
 fn codex_property_meta<'a>(raw: &'a Value, id: &str) -> Option<&'a Value> {
     raw.get("requestedSchema")?
         .get("properties")?
@@ -1163,8 +1164,8 @@ fn is_codex_synthetic_other_choice(raw: &Value, id: &str, label: &str, value: &s
 /// marker means codeg keeps collapsing the companion into the card's built-in
 /// "Other" input no matter which adapter produced the form.
 ///
-/// Like [`is_secret_property`], this reads the raw JSON: the typed sacp
-/// property structs drop `_meta`.
+/// Like [`is_secret_property`], this reads the raw JSON: the typed schema
+/// property structs carry no `_meta`.
 fn is_custom_answer_property(raw: &Value, id: &str) -> bool {
     raw.get("requestedSchema")
         .and_then(|s| s.get("properties"))
@@ -1184,17 +1185,6 @@ fn is_mcp_tool_call_approval(raw: &Value) -> bool {
         .and_then(|m| m.get("codex_approval_kind"))
         .and_then(Value::as_str)
         == Some("mcp_tool_call")
-}
-
-/// Codex's auto-resolution timeout for a `request_user_input` elicitation
-/// (`_meta.codex.autoResolutionMs`). When set, codex-acp races the elicitation
-/// against this timer and answers `{answers: {}}` itself on expiry — the
-/// connection handler mirrors it to reap the by-then-pointless card.
-pub fn elicitation_auto_resolution_ms(raw: &Value) -> Option<u64> {
-    raw.get("_meta")?
-        .get("codex")?
-        .get("autoResolutionMs")?
-        .as_u64()
 }
 
 /// Classify a form `elicitation/create` request (the raw JSON params) into its
@@ -1299,7 +1289,7 @@ fn decline_approval_option() -> ElicitationApprovalOption {
 /// Allow/Decline. Mirrors codex-acp's own `request_permission` fallback
 /// (`buildToolApprovalOptions`) so approvals look identical either way.
 fn approval_from_form(
-    form: &sacp::schema::ElicitationFormMode,
+    form: &agent_client_protocol::schema::v1::ElicitationFormMode,
     message: String,
     tool_call_id: Option<String>,
 ) -> ElicitationApproval {
@@ -1359,8 +1349,8 @@ fn approval_from_form(
 }
 
 /// True when the raw schema property carries codex's secret marker
-/// (`_meta.codex.isSecret`). The typed sacp property structs drop `_meta`, so
-/// this reads the raw JSON alongside them.
+/// (`_meta.codex.isSecret`). The typed schema property structs carry no
+/// `_meta`, so this reads the raw JSON alongside them.
 fn is_secret_property(raw: &Value, id: &str) -> bool {
     raw.get("requestedSchema")
         .and_then(|s| s.get("properties"))
@@ -1378,7 +1368,7 @@ fn is_secret_property(raw: &Value, id: &str) -> bool {
 /// always-present "Other" input) — including plain strings, numbers, integers,
 /// and choice fields whose options were all empty/duplicate.
 fn parse_form_questions(
-    form: &sacp::schema::ElicitationFormMode,
+    form: &agent_client_protocol::schema::v1::ElicitationFormMode,
     raw: &Value,
     peer: ElicitationPeer,
 ) -> ElicitationQuestions {
@@ -2648,16 +2638,6 @@ mod tests {
         assert_eq!(v["action"], "decline");
         let v = serde_json::to_value(elicitation_cancel_response()).unwrap();
         assert_eq!(v["action"], "cancel");
-    }
-
-    #[test]
-    fn elicitation_auto_resolution_ms_reads_codex_meta() {
-        let mut raw = elicitation_raw(json!({}), json!([]));
-        assert_eq!(elicitation_auto_resolution_ms(&raw), None);
-        raw["_meta"] = json!({"codex": {"autoResolutionMs": 30000}});
-        assert_eq!(elicitation_auto_resolution_ms(&raw), Some(30000));
-        raw["_meta"] = json!({"codex": {"autoResolutionMs": null}});
-        assert_eq!(elicitation_auto_resolution_ms(&raw), None);
     }
 
     #[test]

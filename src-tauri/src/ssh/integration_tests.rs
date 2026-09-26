@@ -9,10 +9,10 @@ use crate::db::service::remote_workspace_connection_service as profiles;
 use crate::models::RemoteWorkspaceSshConfig;
 
 async fn websocket_ready(base_url: &str, token: &str) {
-    let url = http_url_to_ws_url(base_url);
+    let url = http_url_to_ws_url(base_url, "/ws/events");
     let mut socket = tokio::time::timeout(
         Duration::from_secs(10),
-        connect_with_subprotocol_auth(&url, token, &HeaderMap::new()),
+        connect_with_subprotocol_auth(&url, "codeg-events", token, &HeaderMap::new()),
     )
     .await
     .unwrap()

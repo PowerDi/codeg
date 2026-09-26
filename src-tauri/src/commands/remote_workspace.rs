@@ -263,6 +263,12 @@ pub async fn update_remote_workspace_connection(
         input.ssh.as_ref(),
     )
     .await?;
+    let moved = previous.as_ref().is_none_or(|before| {
+        before.base_url != updated.base_url
+            || before.token != updated.token
+            || before.headers != updated.headers
+            || before.ssh != updated.ssh
+    });
     proxy.invalidate_connection(id).await;
     if let Some(old) = previous.and_then(|connection| connection.ssh) {
         let keep_same = input
@@ -279,12 +285,20 @@ pub async fn update_remote_workspace_connection(
             }
         }
     }
+    // The built-in browser's tunnel follows the connection to where it now
+    // points, rather than staying on the old address until it drops. A
+    // rename leaves it be: closing it would cut every live stream of the
+    // connection's tabs (a dev server's reload socket among them).
+    if moved {
+        crate::browser::remote::connection_changed(window.app_handle(), id).await;
+    }
     Ok(updated)
 }
 
 #[cfg(feature = "tauri-runtime")]
 #[cfg_attr(feature = "tauri-runtime", tauri::command)]
 pub async fn delete_remote_workspace_connection(
+    app: AppHandle,
     db: tauri::State<'_, AppDatabase>,
     proxy: tauri::State<'_, Arc<RemoteProxyState>>,
     id: i32,
@@ -301,6 +315,9 @@ pub async fn delete_remote_workspace_connection(
         }
     }
     proxy.close_connection(id).await;
+    // What the remote host's pages stored in the built-in browser goes with
+    // the connection they were opened through.
+    crate::browser::remote::forget_connection(&app, id).await;
     Ok(())
 }
 
