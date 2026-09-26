@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import traceback
 import paramiko
 
 
@@ -83,8 +84,14 @@ def main():
                 channel.sendall(b"CODEG_WINDOWS_PASSWORD_OK\n")
                 channel.send_exit_status(0)
                 channel.close()
-        except Exception as error:
-            failures.append(type(error).__name__)
+                # Let ssh.exe read the exit status and close the connection
+                # first. Tearing the transport down while the client still has
+                # data in flight makes Windows turn the close into a TCP reset
+                # that discards the unread exit status, which ssh reports as
+                # "client_loop: send disconnect: Connection reset".
+                transport.join(20)
+        except Exception:
+            failures.append(traceback.format_exc())
 
     ssh_thread = threading.Thread(target=serve_ssh, daemon=True)
     ssh_thread.start()
@@ -109,9 +116,12 @@ def main():
                 result = subprocess.run(command, input=b"stdin-is-not-the-password\n", capture_output=True,
                                         env=env, timeout=45, creationflags=subprocess.CREATE_NO_WINDOW)
                 if result.returncode != 0 or result.stdout.strip() != b"CODEG_WINDOWS_PASSWORD_OK":
-                    raise RuntimeError("Native Windows askpass failed: " + result.stderr.decode(errors="replace"))
+                    raise RuntimeError(
+                        "Native Windows askpass failed: stdout=%r stderr=%r prompts=%r"
+                        % (result.stdout, result.stderr.decode(errors="replace"), prompts)
+                    )
                 if prompts != ["hostKey", "password"] or not known_hosts.is_file():
-                    raise RuntimeError("Unexpected host-trust / password prompt flow")
+                    raise RuntimeError("Unexpected host-trust / password prompt flow: %r" % (prompts,))
         finally:
             broker.shutdown()
             listener.close()
