@@ -2,7 +2,7 @@ name: SSH Workspace Checks
 
 on:
   push:
-    branches: [feat/ssh-remote-workspaces]
+    branches: [main, feat/ssh-remote-workspaces]
   workflow_dispatch:
 
 permissions:
