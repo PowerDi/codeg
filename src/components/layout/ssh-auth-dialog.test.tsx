@@ -82,9 +82,7 @@ describe("SshAuthDialog", () => {
     expect(input).toHaveAttribute("type", "password")
     fireEvent.change(input, { target: { value: "  secret with spaces  " } })
     await act(async () => {
-      fireEvent.click(
-        screen.getByRole("button", { name: "Connect", exact: true })
-      )
+      fireEvent.click(screen.getByRole("button", { name: /^Connect$/ }))
     })
     expect(mocks.answer).toHaveBeenCalledWith("answer_ssh_auth_prompt", {
       requestId: "first",
@@ -216,9 +214,7 @@ describe("SshAuthDialog", () => {
       target: { value: "do-not-log-me" },
     })
     await act(async () => {
-      fireEvent.click(
-        screen.getByRole("button", { name: "Connect", exact: true })
-      )
+      fireEvent.click(screen.getByRole("button", { name: /^Connect$/ }))
     })
     expect(screen.getByRole("alert")).toHaveTextContent(
       "Unable to send your answer"

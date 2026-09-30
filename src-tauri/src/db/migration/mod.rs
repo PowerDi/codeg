@@ -46,6 +46,8 @@ mod m20260830_000001_canvas_node;
 mod m20260831_000001_canvas_node_group_grid;
 mod m20260907_000001_canvas_node_path;
 mod m20260920_000001_remote_workspace_connection_ssh;
+mod m20260929_000001_canvas_board;
+mod m20260930_000001_agent_setting_drop_adapter_channel;
 pub struct Migrator;
 
 #[async_trait::async_trait]
@@ -98,6 +100,129 @@ impl MigratorTrait for Migrator {
             Box::new(m20260831_000001_canvas_node_group_grid::Migration),
             Box::new(m20260907_000001_canvas_node_path::Migration),
             Box::new(m20260920_000001_remote_workspace_connection_ssh::Migration),
+            Box::new(m20260929_000001_canvas_board::Migration),
+            Box::new(m20260930_000001_agent_setting_drop_adapter_channel::Migration),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::service::remote_workspace_connection_service as profiles;
+    use crate::models::RemoteWorkspaceSshConfig;
+    use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement};
+
+    const SSH_MIGRATION: &str = "m20260920_000001_remote_workspace_connection_ssh";
+    const CANVAS_MIGRATION: &str = "m20260929_000001_canvas_board";
+    const ADAPTER_MIGRATION: &str = "m20260930_000001_agent_setting_drop_adapter_channel";
+
+    async fn empty_database() -> DatabaseConnection {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "PRAGMA foreign_keys=ON;".to_string(),
+        ))
+        .await
+        .unwrap();
+        db
+    }
+
+    #[test]
+    fn upstream_sync_keeps_ssh_and_new_upstream_migrations() {
+        let migrations = Migrator::migrations();
+        let names: Vec<_> = migrations
+            .iter()
+            .map(|migration| migration.name())
+            .collect();
+        let unique: std::collections::HashSet<_> = names.iter().copied().collect();
+        assert_eq!(names.len(), unique.len(), "migration names must be unique");
+        let position = |name| names.iter().position(|entry| *entry == name).unwrap();
+        assert!(position(SSH_MIGRATION) < position(CANVAS_MIGRATION));
+        assert!(position(CANVAS_MIGRATION) < position(ADAPTER_MIGRATION));
+    }
+
+    #[tokio::test]
+    async fn upstream_sync_preserves_existing_fork_ssh_profiles() {
+        let db = empty_database().await;
+        let before_upstream = Migrator::migrations()
+            .iter()
+            .position(|migration| migration.name() == CANVAS_MIGRATION)
+            .unwrap();
+        // Recreate the fork schema before the two new upstream migrations.
+        Migrator::up(&db, Some(before_upstream as u32))
+            .await
+            .unwrap();
+        let config = RemoteWorkspaceSshConfig {
+            host: "migration-test.invalid".into(),
+            username: Some("builder".into()),
+            port: Some(2222),
+            remember_password: true,
+            credential_id: Some("00000000-0000-4000-8000-000000000042".into()),
+            ..Default::default()
+        };
+        // This stores the locator/reference only; it never accesses an SSH
+        // host, the user's database or their system credential store.
+        let profile = profiles::create(&db, "Existing SSH", "", "", &[], Some(&config))
+            .await
+            .unwrap();
+
+        Migrator::up(&db, None).await.unwrap();
+        Migrator::up(&db, None).await.unwrap();
+
+        let saved = profiles::get(&db, profile.id).await.unwrap().unwrap();
+        assert_eq!(saved.ssh, Some(config));
+        assert_eq!(saved.base_url, profile.base_url);
+        assert!(saved.token.is_empty());
+        let schema = SchemaManager::new(&db);
+        assert!(schema.has_table("canvas_board").await.unwrap());
+        assert!(schema.has_column("canvas_node", "board_id").await.unwrap());
+    }
+
+    /// An official upstream database already has the newer migrations but not
+    /// the fork's older-dated SSH migration. Upgrading must add just that column.
+    struct UpstreamSchema;
+
+    #[async_trait::async_trait]
+    impl MigratorTrait for UpstreamSchema {
+        fn migrations() -> Vec<Box<dyn MigrationTrait>> {
+            Migrator::migrations()
+                .into_iter()
+                .filter(|migration| migration.name() != SSH_MIGRATION)
+                .collect()
+        }
+    }
+
+    #[tokio::test]
+    async fn upstream_sync_adds_ssh_to_an_existing_official_database() {
+        let db = empty_database().await;
+        UpstreamSchema::up(&db, None).await.unwrap();
+        assert!(!SchemaManager::new(&db)
+            .has_column("remote_workspace_connection", "ssh_config")
+            .await
+            .unwrap());
+        db.execute(Statement::from_string(
+            DbBackend::Sqlite,
+            "INSERT INTO remote_workspace_connection \
+             (name, base_url, token, sort_order, created_at, updated_at) \
+             VALUES ('Existing HTTP', 'https://example.invalid', 'fixture-token', \
+             0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);"
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+
+        Migrator::up(&db, None).await.unwrap();
+        Migrator::up(&db, None).await.unwrap();
+
+        assert!(SchemaManager::new(&db)
+            .has_column("remote_workspace_connection", "ssh_config")
+            .await
+            .unwrap());
+        let connections = profiles::list(&db).await.unwrap();
+        assert_eq!(connections.len(), 1);
+        assert_eq!(connections[0].base_url, "https://example.invalid");
+        assert_eq!(connections[0].token, "fixture-token");
+        assert!(connections[0].ssh.is_none());
     }
 }
