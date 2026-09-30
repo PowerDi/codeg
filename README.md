@@ -30,6 +30,8 @@ It aggregates your sessions from every supported agent CLI into one searchable w
 
 [SSH-managed remote workspaces](./docs/ssh-workspaces.md) - setup, security, lifecycle and recovery.
 
+[SSH fork maintenance and upstream updates (中文)](./docs/maintenance/ssh-upstream-sync.md) - preserve SSH changes, keep upstream update notifications, and deliver build links only.
+
 ## 💖 Sponsors
 
 <table>

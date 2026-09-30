@@ -113,6 +113,17 @@ INSTA_UPDATE=auto cargo test --features test-utils     # 自动写新 .snap
 - **服务器部署**：通过环境变量配置（`CODEG_PORT`、`CODEG_HOST`、`CODEG_TOKEN`、`CODEG_DATA_DIR`、`CODEG_STATIC_DIR`）
 - **Docker 支持**：多阶段构建（Node.js + Rust），支持 `docker-compose` 一键部署
 
+## Fork 的 SSH 功能维护与构建交付
+
+- 同步上游时必须保留并适配本 Fork 的 SSH 远端工作区功能；它已集成到源码中，
+  不是每次更新后临时注入的插件。不要用覆盖式同步或整批选择上游版本丢弃定制改动。
+- **桌面更新源继续指向上游 `xintaofei/codeg`**，保留新版本检查和提醒及签名验证。
+  不因维护 SSH 功能而改成 Fork 更新源或关闭提醒；查看上游更新不等于安装上游包。
+- **每次构建后只提供产物地址、提交 SHA 和检查结果**，不替用户下载、解压、
+  启动或安装桌面产物，也不替用户执行应用内更新。后续操作需另行确认。
+- 更新前备份、冲突检查、SSH 回归验证和地址交付规范见
+  [SSH 与上游更新维护指南](docs/maintenance/ssh-upstream-sync.md)。
+
 ## 代码风格
 
 - Prettier：无分号、尾逗号（es5）、2 空格缩进、80 字符宽度

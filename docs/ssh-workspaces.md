@@ -1,5 +1,10 @@
 # SSH-managed remote workspaces
 
+For upstream merges and build delivery, see the
+[SSH fork maintenance guide (中文)](./maintenance/ssh-upstream-sync.md).
+Keep upstream desktop update notifications enabled; fork build delivery ends
+with artifact links, without downloading or installing the desktop package for the user.
+
 The desktop can install and start a prebuilt `codeg-server` on a Linux host,
 then connect through an app-owned SSH tunnel. No remote Rust installation,
 systemd configuration, exposed HTTP port, or pasted server token is needed.
@@ -161,7 +166,7 @@ The built desktop executable handles askpass before starting logging or Tauri.
 ## Verification
 
 **SSH Workspace Checks** runs frontend lint, tests and static export, Linux
- desktop tests and clippy, server tests, and server/companion clippy. The existing
+desktop tests and clippy, server tests, and server/companion clippy. The existing
 **Windows Test Build** produces an unsigned Windows x64 installer without
 publishing a release.
 
